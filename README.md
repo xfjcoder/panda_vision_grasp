@@ -66,16 +66,14 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    **not** the project's deliverable (it uses privileged ground-truth object position), only a
    feasibility check and a reference number to compare the eventual vision policy against.
 
-   `assets/grasp_scene.xml` adds a static table, a free-floating graspable sphere (radius
-   2.5cm, same choice as `barrett_wam`'s own grasp object and for the same reason --
-   orientation-invariant, so this first vision task doesn't also have to solve orientation
-   estimation from pixels), and a fixed external `workspace_cam` (computed via a look-at from
-   `(1.3, 0, 1.05)` toward the table center) -- the same view the eventual pixels-only policy
-   will actually observe from. One small, documented modification to the vendored `panda.xml`
-   (see `assets/NOTICE.md`): added a `gripper` site at the same local offset the upstream
-   package's own MJX variant already uses, needed as an IK/grasp-point reference.
+   `assets/grasp_scene.xml` adds a static table, a free-floating graspable object, and a fixed
+   external `workspace_cam` (computed via a look-at from `(1.3, 0, 1.05)` toward the table
+   center) -- the same view the eventual pixels-only policy will actually observe from. One
+   small, documented modification to the vendored `panda.xml` (see `assets/NOTICE.md`): added a
+   `gripper` site at the same local offset the upstream package's own MJX variant already uses,
+   needed as an IK/grasp-point reference.
 
-   **Two real bugs found and fixed, not glossed over**:
+   **Three real bugs found and fixed, not glossed over**:
    - **Object spawned inside the table.** `table_top_z` was computed from `model.geom_pos`
      (the table-top geom's *local* offset inside its parent body, which is `(0,0,0)` here,
      since this scene nests the geom inside a positioned body rather than placing it directly
@@ -108,22 +106,67 @@ under the model's own (already-tuned) position actuators, then the gripper closi
      forearm into the table anyway. Fixed by folding that check directly into candidate
      selection: a candidate is rejected outright if warm-starting it down to the actual grasp
      height produces any arm/table contact, before orientation is used to rank the survivors.
+   - **A sphere (tried first, same object choice as `barrett_wam` and for the same
+     orientation-invariance reason) turned out not to work with this gripper.** It looked fine
+     right after lifting but was found to slip free after roughly a second of an otherwise-
+     completely-static hold -- gripper qpos collapsing from ~0.025 to ~0 and the object
+     dropping back to the table -- a real geometric mismatch (pinching a smooth round object
+     between two flat parallel pads is a classic non-form-closure grasp), not a tuning bug:
+     higher friction wasn't the fix. The eval itself was missing this entirely at first too,
+     since it only measured rise right after the lift motion completed with no further hold --
+     fixed by adding a 2-second static `POST_LIFT_HOLD_SECONDS` before measuring success, which
+     is what actually caught the slip. Switched the object to a small box instead (flat faces
+     mate properly with the flat gripper pads), which brings an orientation requirement back
+     in -- handled by computing the box's spawn yaw per trial (`object_yaw_for_gripper`) from
+     the gripper's actual closing-axis direction at whichever posture `best_oriented_ik`
+     happened to land on, rather than fixing one global orientation that would only sometimes
+     line up.
 
-   **Evaluated over 20 random table positions** (`eval_stage2_reach_grasp.py`): **20/20
-   grasped** (object consistently rises ~0.133-0.137m of a commanded 0.15m lift, settles
-   within 7mm of its starting position) -- a clean, reliable baseline, unlike `barrett_wam`'s
-   own first-grasp-attempt numbers (11/20), mostly because a rigid 2-finger parallel gripper
-   squeezing a sphere has no analog of the BHand's coupled-linkage "full closure retracts past
-   the object" failure mode, and this sanity check doesn't yet have to contend with a
-   learned-from-pixels perception error on top of the control problem.
+   **Evaluated over 20 random table positions** (`eval_stage2_reach_grasp.py`), now including
+   the 2-second post-lift static hold: **20/20 grasped** (object rises ~0.142-0.147m of a
+   commanded 0.15m lift, settles within 6mm of its starting position) -- a clean, reliable
+   baseline, genuinely stable under sustained holding, not just at the instant the lift motion
+   finishes.
 
    <p align="center">
-     <img src="media/stage2_reach_grasp.gif" width="480" alt="Franka Panda arm reaching down, closing its gripper around a red sphere, and lifting it off the table, viewed from the fixed workspace camera">
+     <img src="media/stage2_reach_grasp.gif" width="480" alt="Franka Panda arm reaching down, closing its gripper around a small red box, and lifting it off the table, viewed from the fixed workspace camera">
    </p>
 
    *Stage 2's demo (`demo_stage2_reach_grasp.py`, seed 0): rendered from the exact same fixed
    `workspace_cam` the eventual pixels-only policy will observe from, not a cosmetic orbiting
    camera -- this is the view the vision task actually has to solve from.*
+
+3. **The actual vision Gym environment -- DONE (env verified, policy training not yet
+   launched).** `grasp_env.py`'s `GraspPixelEnv`: a Gymnasium env whose observation is
+   `{"image": 64x64 RGB from workspace_cam, "proprio": 15-dim arm joint pos/vel + gripper
+   position}` -- no object position, no contact force, no privileged state of any kind reaches
+   the policy. Action is 8-dim: a per-step delta on the 7 arm joint targets (bounded by
+   `MAX_JOINT_RATE`) plus a direct gripper ctrl command, same bounded-step reasoning as
+   `barrett_wam`'s residual design (keeps early random-policy exploration from immediately
+   slamming the arm into the table or a joint limit). Reward is dense shaping (gripper-to-object
+   distance, object height while lifted) plus a terminal success bonus, computed from
+   ground-truth object state during training -- that's standard practice and doesn't leak into
+   what the policy itself observes.
+
+   **Scope decision, made explicitly rather than left implicit**: episodes start from a
+   `best_oriented_ik`-computed pregrasp posture above the (randomized) object, not from the
+   arm's arbitrary home pose -- same reasoning as `barrett_wam`'s own first RL stage, which only
+   tackled its close phase rather than the whole pick. Cold-start RL on a long, multi-phase
+   manipulation task is a well-documented hard problem, and `barrett_wam` hit it directly
+   (repeated from-scratch failures even WITH privileged state) -- so the first attempt here
+   narrows the learned portion to descend + grasp + lift, deferring "vision-guided reach from an
+   arbitrary starting pose" to a later stage once this narrower problem is shown to work at all.
+
+   **Verified the env itself before spending any training compute**, same discipline as
+   `barrett_wam`'s own residual-RL premise check: replayed Stage 2's scripted
+   descend/close/lift trajectory (converted into this env's own action space) through
+   `GraspPixelEnv.step()` end-to-end. Result: `success=True`, matching Stage 2's own grasp
+   criterion exactly, with a sane positive total episode reward (+20.8, dominated by the
+   terminal bonus) -- confirming the env's physics, reward wiring, and action/observation
+   plumbing are all correct before any policy has been trained on it.
+
+   PPO training itself (via `stable_baselines3`, matching every sibling project's conventions)
+   is the next piece of work, not yet started.
 
 ## Repository layout
 
@@ -134,10 +177,12 @@ panda_vision_grasp/
 │   ├── assets/                          # meshes the above MJCF references
 │   ├── LICENSE.franka_emika_panda
 │   ├── CHANGELOG.franka_emika_panda.md
-│   └── NOTICE.md                        # attribution + what's vendored vs. original here
+│   ├── NOTICE.md                        # attribution + what's vendored vs. original here
+│   └── grasp_scene.xml                  # Stage 2: table + graspable box + workspace_cam
 ├── ik.py                             # Stage 2: damped-least-squares Jacobian IK
 ├── control.py                        # Stage 2: gravity-compensation feedforward
 ├── eval_stage2_reach_grasp.py        # Stage 2: 20-trial scripted reach/grasp/lift sanity check
+├── grasp_env.py                      # Stage 3: pixels-to-actions Gym env, see writeup above
 ├── demo_stage1_kinematic_sweep.py    # Stage 1: verification sweep, see media/ GIF above
 ├── demo_stage2_reach_grasp.py        # Stage 2: scripted grasp demo, see media/ GIF above
 ├── media/

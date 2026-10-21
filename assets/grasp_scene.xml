@@ -29,12 +29,21 @@
             friction="1.0 0.01 0.0001"/>
     </body>
 
-    <!-- Free-floating graspable sphere, radius fits well inside the gripper's 0.08m max
-         opening. Initial pos is a placeholder -- randomized via data.qpos at episode reset. -->
+    <!-- Free-floating graspable box. A sphere was tried first (orientation-invariant, same
+         choice and reasoning as barrett_wam's own grasp object) but found NOT to work well
+         with this gripper: pinching a smooth sphere between two flat parallel pads is a
+         classic non-form-closure grasp, and it was confirmed to slip free after roughly a
+         second of otherwise-static holding (gripper qpos collapsing from ~0.025 to ~0, the
+         object dropping back to the table) even though the lift itself looked fine moments
+         earlier -- not a tuning bug, a real geometric mismatch between a round object and flat
+         parallel jaws. A box's flat faces mate properly with the flat pads instead. Its yaw IS
+         still set per-trial (not left arbitrary) to align those faces with whichever
+         orientation the IK solve actually lands on -- see
+         eval_stage2_reach_grasp.py's object_yaw_for_gripper. -->
     <body name="object" pos="0.5 0 0.44">
       <freejoint name="object_free"/>
-      <geom name="object_geom" type="sphere" size="0.025" material="object_mat" mass="0.05"
-            condim="6" friction="1.0 0.01 0.0001" solref="0.004 1"/>
+      <geom name="object_geom" type="box" size="0.02 0.02 0.03" material="object_mat" mass="0.05"
+            friction="1.5 0.02 0.0002"/>
     </body>
 
     <!-- Fixed external workspace camera: ~3/4 downward view covering the table, object, and

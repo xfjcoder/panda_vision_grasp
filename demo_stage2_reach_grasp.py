@@ -19,7 +19,8 @@ from control import pd_gravity_comp_step
 from eval_stage2_reach_grasp import (SCENE, SITE, STANDOFF, LIFT_HEIGHT, GRIPPER_OPEN,
                                       GRIPPER_CLOSE, PREGRASP_SECONDS, DESCEND_SECONDS,
                                       CLOSE_SECONDS, HOLD_SECONDS, LIFT_SECONDS,
-                                      random_table_xy, best_oriented_ik)
+                                      POST_LIFT_HOLD_SECONDS, random_table_xy, best_oriented_ik,
+                                      object_yaw_for_gripper, _yaw_quat)
 from ik import solve_ik, N_ARM
 
 SEED = 0
@@ -32,13 +33,14 @@ def main():
 
     model = mj.MjModel.from_xml_path(SCENE)
     data = mj.MjData(model)
+    site_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_SITE, SITE)
     obj_body = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "object")
     obj_joint = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, "object_free")
     obj_qadr = model.jnt_qposadr[obj_joint]
     obj_dof = model.jnt_dofadr[obj_joint]
     obj_geom = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "object_geom")
     table_geom = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "table_top")
-    sphere_radius = model.geom_size[obj_geom][0]
+    obj_half_height = model.geom_size[obj_geom][2]
 
     rng = np.random.default_rng(SEED)
     obj_xy = random_table_xy(rng)
@@ -48,7 +50,7 @@ def main():
     data.qpos[obj_qadr + 3:obj_qadr + 7] = [1, 0, 0, 0]
     mj.mj_forward(model, data)
     table_top_z = data.geom_xpos[table_geom][2] + model.geom_size[table_geom][2]
-    obj_pos0 = np.array([obj_xy[0], obj_xy[1], table_top_z + sphere_radius])
+    obj_pos0 = np.array([obj_xy[0], obj_xy[1], table_top_z + obj_half_height])
 
     dt = model.opt.timestep
     restart_rng = np.random.default_rng(40_000 + SEED)
@@ -80,8 +82,9 @@ def main():
         if step_count[0] % 20 == 0:
             render()
 
+    yaw = object_yaw_for_gripper(model, q_pregrasp, site_id)
     data.qpos[obj_qadr:obj_qadr + 3] = obj_pos0
-    data.qpos[obj_qadr + 3:obj_qadr + 7] = [1, 0, 0, 0]
+    data.qpos[obj_qadr + 3:obj_qadr + 7] = _yaw_quat(yaw)
     data.qvel[obj_dof:obj_dof + 6] = 0.0
     mj.mj_forward(model, data)
 
@@ -93,6 +96,8 @@ def main():
     lifted = obj_pos0 + np.array([0, 0, LIFT_HEIGHT])
     q_lifted, _, _ = solve_ik(model, lifted, q_grasp, max_iters=150, tol=0.01)
     run((q_grasp, q_lifted), GRIPPER_CLOSE, int(LIFT_SECONDS / dt))
+
+    run((q_lifted, q_lifted), GRIPPER_CLOSE, int(POST_LIFT_HOLD_SECONDS / dt))
 
     obj_final = data.xpos[obj_body].copy()
     rise = obj_final[2] - obj_pos0[2]

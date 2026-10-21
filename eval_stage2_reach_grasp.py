@@ -45,11 +45,37 @@ DESCEND_SECONDS = 1.5
 CLOSE_SECONDS = 1.0
 HOLD_SECONDS = 0.5
 LIFT_SECONDS = 1.5
+POST_LIFT_HOLD_SECONDS = 2.0  # see run_trial: a static hold immediately after lift is what
+                              # actually exposed the sphere-slipping bug -- measuring rise right
+                              # after the lift motion completed missed it entirely.
 
 
 def random_table_xy(rng):
     (xlo, xhi), (ylo, yhi) = TABLE_XY_RANGE
     return np.array([rng.uniform(xlo, xhi), rng.uniform(ylo, yhi)])
+
+
+def object_yaw_for_gripper(model, q_arm, site_id):
+    """Returns the world-frame yaw (rotation about Z) that aligns the box object's flat faces
+    with whichever orientation best_oriented_ik's IK solve actually landed on for this trial.
+
+    The gripper's closing direction is the "hand" body's local Y axis (both finger joints slide
+    along local Y, see assets/panda.xml); a flat-faced box needs that axis to line up with one
+    of its own flat-face normals, or the jaws contact an edge/corner instead of a face. Since
+    best_oriented_ik only scores how downward the approach is (never the roll about that
+    approach axis), the gripper's actual closing direction varies table-position to
+    table-position -- so the box's spawn yaw is computed per trial from the solved q_arm,
+    not fixed to a single global convention.
+    """
+    data = mj.MjData(model)
+    data.qpos[:N_ARM] = q_arm
+    mj.mj_forward(model, data)
+    local_y_world = data.site_xmat[site_id].reshape(3, 3)[:, 1]
+    return np.arctan2(local_y_world[1], local_y_world[0])
+
+
+def _yaw_quat(yaw):
+    return np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
 
 
 def _has_arm_table_contact(model, data):
@@ -114,7 +140,7 @@ def run_trial(model, obj_xy, restart_rng):
 
     obj_geom = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "object_geom")
     table_geom = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "table_top")
-    sphere_radius = model.geom_size[obj_geom][0]
+    obj_half_height = model.geom_size[obj_geom][2]
     # table_top is a geom nested inside the "table" body (not directly in worldbody, unlike
     # barrett_wam's layout), so model.geom_pos is LOCAL to that body (0,0,0 here) -- the world
     # z needs data.geom_xpos (post mj_forward), not model.geom_pos, or this silently computes
@@ -122,7 +148,7 @@ def run_trial(model, obj_xy, restart_rng):
     mj.mj_forward(model, data)
     table_top_z = data.geom_xpos[table_geom][2] + model.geom_size[table_geom][2]
 
-    obj_pos0 = np.array([obj_xy[0], obj_xy[1], table_top_z + sphere_radius])
+    obj_pos0 = np.array([obj_xy[0], obj_xy[1], table_top_z + obj_half_height])
     data.qpos[:N_ARM] = 0.0
     data.qvel[:N_ARM] = 0.0
     # Parked out of the way during pregrasp, placed once the arm has safely parked above the
@@ -146,8 +172,9 @@ def run_trial(model, obj_xy, restart_rng):
         pd_gravity_comp_step(model, data, q_pregrasp, GRIPPER_OPEN)
     q_arm = q_pregrasp.copy()
 
+    yaw = object_yaw_for_gripper(model, q_pregrasp, site_id)
     data.qpos[obj_qadr:obj_qadr + 3] = obj_pos0
-    data.qpos[obj_qadr + 3:obj_qadr + 7] = [1, 0, 0, 0]
+    data.qpos[obj_qadr + 3:obj_qadr + 7] = _yaw_quat(yaw)
     data.qvel[obj_dof:obj_dof + 6] = 0.0
     mj.mj_forward(model, data)
 
@@ -179,6 +206,14 @@ def run_trial(model, obj_xy, restart_rng):
         q_target = q_arm + (q_lifted - q_arm) * frac
         pd_gravity_comp_step(model, data, q_target, GRIPPER_CLOSE)
     q_arm = q_lifted.copy()
+
+    # A static hold immediately after lift, gripper target unchanged -- this is what actually
+    # caught the sphere-slipping bug (see the object's own docstring note in grasp_scene.xml):
+    # measuring success right after the lift motion completed, with no further hold, missed a
+    # grip that looked fine for about a second and then silently let go.
+    n = int(POST_LIFT_HOLD_SECONDS / dt)
+    for _ in range(n):
+        pd_gravity_comp_step(model, data, q_arm, GRIPPER_CLOSE)
 
     obj_after_lift = data.xpos[obj_body].copy()
     rise = obj_after_lift[2] - obj_before_lift[2]
