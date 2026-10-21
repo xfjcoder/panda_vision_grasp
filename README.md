@@ -59,6 +59,72 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    of what a learned policy has to work with -- revisit only if a later stage's results suggest
    this sag is actually a limiting factor, not before.
 
+2. **Grasp scene + a scripted (privileged-state) reach/grasp/lift sanity check -- DONE.**
+   Before spending any effort on the actual pixels-only learning problem, confirmed the scene
+   itself (table height, object size, gripper geometry, joint reach) is physically solvable at
+   all -- same discipline as `barrett_wam`'s own staged approach. This scripted baseline is
+   **not** the project's deliverable (it uses privileged ground-truth object position), only a
+   feasibility check and a reference number to compare the eventual vision policy against.
+
+   `assets/grasp_scene.xml` adds a static table, a free-floating graspable sphere (radius
+   2.5cm, same choice as `barrett_wam`'s own grasp object and for the same reason --
+   orientation-invariant, so this first vision task doesn't also have to solve orientation
+   estimation from pixels), and a fixed external `workspace_cam` (computed via a look-at from
+   `(1.3, 0, 1.05)` toward the table center) -- the same view the eventual pixels-only policy
+   will actually observe from. One small, documented modification to the vendored `panda.xml`
+   (see `assets/NOTICE.md`): added a `gripper` site at the same local offset the upstream
+   package's own MJX variant already uses, needed as an IK/grasp-point reference.
+
+   **Two real bugs found and fixed, not glossed over**:
+   - **Object spawned inside the table.** `table_top_z` was computed from `model.geom_pos`
+     (the table-top geom's *local* offset inside its parent body, which is `(0,0,0)` here,
+     since this scene nests the geom inside a positioned body rather than placing it directly
+     in `worldbody` the way `barrett_wam`'s layout did) instead of `data.geom_xpos` (the
+     resolved *world*-frame position) -- silently computing the body's own origin height
+     instead of the table's actual top surface. The sphere spawned embedded 21cm deep inside
+     the table block, and the contact solver's violent resolution of that overlap sent it
+     sliding clear across the table at explosive speed (drift up to 20m, confirmed). Fixed by
+     reading `data.geom_xpos` (post `mj_forward`) instead.
+   - **Position-only IK's redundant-DOF drift, a new failure mode this project hadn't hit
+     before.** Even after fixing the spawn bug, re-solving IK on a slowly-moving Cartesian
+     target every single control step (the same pattern `barrett_wam`'s `run_phase` used
+     successfully) let the arm's 4 redundant DOF drift through null space over hundreds of
+     tiny re-solves, with nothing pulling them back -- confirmed directly: the forearm
+     (`link3`) ended up pinned against the table, `qfrc_actuator` saturated at its torque limit
+     fighting a real contact, even though every single per-step IK solve reported success
+     (its convergence check is purely kinematic and has no notion of what the real,
+     physically-driven arm can or can't do). A pure null-space bias term (pulling the
+     redundant DOF toward the original posture) was tried first and made things worse, not
+     better -- discrete joint-limit clipping breaks the clean orthogonality the math assumes,
+     so a non-trivial bias weight just destabilized the primary-task convergence instead.
+     **Fixed with a structurally different approach instead of a tuning fix**: solve IK
+     *once* for the final descend target (warm-started from the already-validated pregrasp
+     posture, not from scratch), then interpolate the commanded pose in *joint* space between
+     the two solved endpoints -- no per-step re-solving, so there's nothing left to drift.
+     Also found that orientation-score selection alone (picking whichever `best_oriented_ik`
+     candidate faces most nearly downward, `barrett_wam`'s own criterion) wasn't sufficient by
+     itself: the single best-scoring candidate for one specific table position still pinned a
+     joint at its hard limit and, when warm-started down to the grasp height, drove the
+     forearm into the table anyway. Fixed by folding that check directly into candidate
+     selection: a candidate is rejected outright if warm-starting it down to the actual grasp
+     height produces any arm/table contact, before orientation is used to rank the survivors.
+
+   **Evaluated over 20 random table positions** (`eval_stage2_reach_grasp.py`): **20/20
+   grasped** (object consistently rises ~0.133-0.137m of a commanded 0.15m lift, settles
+   within 7mm of its starting position) -- a clean, reliable baseline, unlike `barrett_wam`'s
+   own first-grasp-attempt numbers (11/20), mostly because a rigid 2-finger parallel gripper
+   squeezing a sphere has no analog of the BHand's coupled-linkage "full closure retracts past
+   the object" failure mode, and this sanity check doesn't yet have to contend with a
+   learned-from-pixels perception error on top of the control problem.
+
+   <p align="center">
+     <img src="media/stage2_reach_grasp.gif" width="480" alt="Franka Panda arm reaching down, closing its gripper around a red sphere, and lifting it off the table, viewed from the fixed workspace camera">
+   </p>
+
+   *Stage 2's demo (`demo_stage2_reach_grasp.py`, seed 0): rendered from the exact same fixed
+   `workspace_cam` the eventual pixels-only policy will observe from, not a cosmetic orbiting
+   camera -- this is the view the vision task actually has to solve from.*
+
 ## Repository layout
 
 ```
@@ -69,9 +135,14 @@ panda_vision_grasp/
 │   ├── LICENSE.franka_emika_panda
 │   ├── CHANGELOG.franka_emika_panda.md
 │   └── NOTICE.md                        # attribution + what's vendored vs. original here
-├── demo_stage1_kinematic_sweep.py   # Stage 1: verification sweep, see media/ GIF above
+├── ik.py                             # Stage 2: damped-least-squares Jacobian IK
+├── control.py                        # Stage 2: gravity-compensation feedforward
+├── eval_stage2_reach_grasp.py        # Stage 2: 20-trial scripted reach/grasp/lift sanity check
+├── demo_stage1_kinematic_sweep.py    # Stage 1: verification sweep, see media/ GIF above
+├── demo_stage2_reach_grasp.py        # Stage 2: scripted grasp demo, see media/ GIF above
 ├── media/
-│   └── stage1_kinematic_sweep.gif
+│   ├── stage1_kinematic_sweep.gif
+│   └── stage2_reach_grasp.gif
 ├── requirements.txt
 └── README.md
 ```

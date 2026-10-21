@@ -7,5 +7,11 @@ re-derived or pruned, since this package is already a curated, ready-to-use MJCF
 `barrett_wam`'s Barrett WAM, no MuJoCo-ready model existed for that robot anywhere in this
 environment, which is why that project's vendoring was a real build step instead of a copy.
 
+**One small modification to `panda.xml`**: added a `<site name="gripper" pos="0 0 0.1"/>` inside
+the `hand` body, at the exact same local offset the same upstream package's own `mjx_panda.xml`
+variant already uses for its own gripper site -- this file (the non-MJX variant) just didn't
+have one. Used as the grasp-point/end-effector site for IK and camera-relative reasoning in this
+project; no other change to the file.
+
 Everything else in this repo (scenes/tasks built on top of this model, training code, docs) is
 original to this project.

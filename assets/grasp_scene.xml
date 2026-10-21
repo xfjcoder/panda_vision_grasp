@@ -1,0 +1,45 @@
+<mujoco model="panda grasp scene">
+  <include file="panda.xml"/>
+
+  <statistic center="0.4 0 0.4" extent="1"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="table_mat" rgba="0.55 0.4 0.28 1"/>
+    <material name="object_mat" rgba="0.85 0.15 0.15 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <light pos="1.0 0.5 1.2" dir="-0.4 -0.2 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <!-- Static table: top surface at z=0.42, within easy reach of the arm (base at origin). -->
+    <body name="table" pos="0.5 0 0.21">
+      <geom name="table_top" type="box" size="0.3 0.4 0.21" material="table_mat"
+            friction="1.0 0.01 0.0001"/>
+    </body>
+
+    <!-- Free-floating graspable sphere, radius fits well inside the gripper's 0.08m max
+         opening. Initial pos is a placeholder -- randomized via data.qpos at episode reset. -->
+    <body name="object" pos="0.5 0 0.44">
+      <freejoint name="object_free"/>
+      <geom name="object_geom" type="sphere" size="0.025" material="object_mat" mass="0.05"
+            condim="6" friction="1.0 0.01 0.0001" solref="0.004 1"/>
+    </body>
+
+    <!-- Fixed external workspace camera: ~3/4 downward view covering the table, object, and
+         the arm's gripper, computed via a look-at (eye=(1.3,0,1.05), target=(0.5,0,0.42)). -->
+    <camera name="workspace_cam" pos="1.3 0 1.05" quat="0.636138 0.308752 0.308752 0.636138"
+            fovy="50"/>
+  </worldbody>
+</mujoco>
