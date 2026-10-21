@@ -1,0 +1,13 @@
+# Not installed into a dedicated venv for this project -- every script here needs mujoco,
+# already present in go1_rl_walk/mpc's own venv. Run every script in this repo with:
+#   /home/cstu/robo/go1_rl_walk/mpc/venv/bin/python3 <script>.py
+#
+# Listed here for reference only (what that venv needs to already have):
+numpy
+mujoco>=3.1.0
+Pillow
+
+# RL stages additionally need (already present in the same venv):
+stable_baselines3
+gymnasium
+torch
