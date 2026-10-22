@@ -360,13 +360,15 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    `grasp05`/`grasp06`: PPO fine-tune from `bc01`, `ent_coef=0.01`, 1M steps).
 
    <p align="center">
-     <img src="media/stage5_rl_failure.gif" width="480" alt="Trained RL policy (grasp04) descending toward the object, nudging it sideways, then neither closing the gripper around it nor lifting it, viewed from the fixed workspace camera">
+     <img src="media/grasp04.gif" width="640" alt="Trained RL policy (grasp04) descending toward the object, nudging it sideways, then neither closing the gripper around it nor lifting it -- left panel is the fixed external workspace_cam the policy actually sees, right panel is the wrist-mounted eye-in-hand wrist_cam, added later purely for visualization">
    </p>
 
-   **What the failure actually looks like** (`grasp04`, seed 0, same view the policy itself
-   sees): the arm descends and makes contact with the object -- it clearly isn't flailing or
-   idle -- but drifts it sideways (`drift=0.106m`) rather than centering, closing, and lifting.
-   This is representative of all four runs' shared shape: real, visible progress on
+   **What the failure actually looks like** (`grasp04`, seed 0; left panel is `workspace_cam`,
+   the view the policy itself sees -- right panel is `wrist_cam`, an eye-in-hand camera added
+   later purely for visualization, never part of the policy's actual observation): the arm
+   descends and makes contact with the object -- it clearly isn't flailing or idle -- but
+   drifts it sideways (`drift=0.106m`) rather than centering, closing, and lifting. This is
+   representative of all four runs' shared shape: real, visible progress on
    reach-and-approach, with the precise close-then-lift sequence never discovered.
 
    | Run | Change tested | Result | Root cause identified |
@@ -381,16 +383,18 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp07` | Same as `grasp06` but `W_APPROACH_SPEED` raised 0.1->0.5 (swept and verified, not a naive 60x guess), PPO fine-tune from `bc01` again | 0/20, `drift`~0.0000m (vs `grasp04`/`05`/`06`'s 0.03-0.3m) | New failure mode: the penalty didn't teach a careful approach, it taught retreat. `dist` briefly tightens to 0.10m by step 10-20, then the arm backs off to 0.69m by episode end while action magnitude stays high (mean 1.37) -- cheaper to leave `PROXIMITY_RADIUS` than pay the approach-speed cost, since this policy was never on a path to the terminal bonus anyway |
    | `grasp08` | Same as `grasp07`, plus a new `W_SMOOTH * ||a_t - a_t-1||^2` action-rate penalty (see below) | 0/20, same retreat pattern as `grasp07` (`dist` never drops below its 0.157m start, climbs to 0.27-0.34m); oscillation somewhat reduced (raw smoothness total 168 vs `grasp01`'s 1675) but swamped by the same avoidance behavior | Confirms the failure is the proximity-gated penalty's design, not oscillation -- adding the smoothness fix on top didn't change the core problem |
 
-   **Every attempt's rollout, not just one representative GIF** -- same `workspace_cam` view
-   the policy itself sees, seed 0 for all seven so the object's start position is identical
-   across runs and only the policy's behavior differs:
+   **Every attempt's rollout, not just one representative GIF** -- each panel pair is
+   `workspace_cam` (left, the view the policy itself sees) and `wrist_cam` (right, an
+   eye-in-hand camera added later purely for visualization -- see NOTICE.md -- never part of
+   any policy's actual observation), seed 0 for all nine so the object's start position is
+   identical across runs and only the policy's behavior differs:
 
    | Run | Rollout |
    |---|---|
    | `grasp01` | <img src="media/grasp01.gif" width="280"> |
    | `grasp02` | <img src="media/grasp02.gif" width="280"> |
    | `grasp03` | <img src="media/grasp03.gif" width="280"> |
-   | `grasp04` | <img src="media/stage5_rl_failure.gif" width="280"> |
+   | `grasp04` | <img src="media/grasp04.gif" width="280"> |
    | `bc01` | <img src="media/bc01.gif" width="280"> |
    | `grasp05` | <img src="media/grasp05.gif" width="280"> |
    | `grasp06` | <img src="media/grasp06.gif" width="280"> |
@@ -493,13 +497,11 @@ panda_vision_grasp/
 ├── data/                             # BC demo datasets (gitignored, not committed)
 ├── demo_stage1_kinematic_sweep.py    # Stage 1: verification sweep, see media/ GIF above
 ├── demo_stage2_reach_grasp.py        # Stage 2: scripted grasp demo, see media/ GIF above
-├── demo_stage5_rl_failure.py         # Stage 5: renders a trained RL policy's failure mode
+├── demo_stage5_rl_failure.py         # Stage 5: renders a policy's rollout, --dual-view adds wrist_cam
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   ├── stage5_rl_failure.gif          # grasp04's rollout
-│   ├── bc01.gif, grasp01.gif, grasp02.gif, grasp03.gif,
-│   └── grasp05.gif - grasp08.gif      # every other attempt's rollout, see table above
+│   └── bc01.gif, grasp01.gif - grasp08.gif   # every attempt's rollout, dual-view, see table above
 ├── requirements.txt
 └── README.md
 ```
