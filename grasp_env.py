@@ -26,7 +26,7 @@ from gymnasium import spaces
 
 from control import pd_gravity_comp_step
 from eval_stage2_reach_grasp import (SCENE, SITE, STANDOFF, LIFT_HEIGHT, GRIPPER_OPEN,
-                                      GRIPPER_CLOSE, random_table_xy, best_oriented_ik,
+                                      GRIPPER_CLOSE, random_table_xy_scaled, best_oriented_ik,
                                       object_yaw_for_gripper, _yaw_quat)
 from ik import N_ARM
 
@@ -50,8 +50,12 @@ TERMINAL_BONUS = 20.0
 class GraspPixelEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, render_size=IMG_SIZE):
+    def __init__(self, render_size=IMG_SIZE, curriculum_scale=1.0):
         super().__init__()
+        # Scales how far from TABLE_XY_RANGE's center the object spawns, in [0, 1]. 1.0 (default)
+        # is the full, final task difficulty -- used whenever this env isn't being driven by a
+        # curriculum callback (eval, smoke tests, non-curriculum training runs).
+        self.curriculum_scale = curriculum_scale
         self.model = mj.MjModel.from_xml_path(SCENE)
         # Shadow mapping turned out to be the dominant cost of rendering on this machine's
         # integrated GPU -- confirmed directly: ~47 renders/sec with it on vs. ~630/sec with it
@@ -88,6 +92,9 @@ class GraspPixelEnv(gym.Env):
         self.obj_pos0 = np.zeros(3)
         self.t = 0
 
+    def set_curriculum_scale(self, scale):
+        self.curriculum_scale = scale
+
     def _table_top_z(self):
         mj.mj_forward(self.model, self.data)
         return self.data.geom_xpos[self.table_geom][2] + self.model.geom_size[self.table_geom][2]
@@ -120,7 +127,7 @@ class GraspPixelEnv(gym.Env):
         # object position and retry rather than let a single unlucky table position crash an
         # entire training run.
         for _ in range(10):
-            obj_xy = random_table_xy(rng)
+            obj_xy = random_table_xy_scaled(rng, self.curriculum_scale)
             obj_pos0 = np.array([obj_xy[0], obj_xy[1], table_top_z + self.obj_half_height])
             above = obj_pos0 + np.array([0, 0, STANDOFF])
             q_pregrasp, _ = best_oriented_ik(self.model, above, rng, descend_check_pos=obj_pos0)

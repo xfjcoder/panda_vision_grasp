@@ -55,6 +55,16 @@ def random_table_xy(rng):
     return np.array([rng.uniform(xlo, xhi), rng.uniform(ylo, yhi)])
 
 
+def random_table_xy_scaled(rng, scale=1.0):
+    """Same as random_table_xy but shrinks the sampled range toward TABLE_XY_RANGE's center by
+    `scale` in [0, 1] -- used for curriculum training (grasp03 showed the policy never even
+    attempting a grasp when thrown at the full range from step 0; start narrow, widen later)."""
+    (xlo, xhi), (ylo, yhi) = TABLE_XY_RANGE
+    xc, yc = (xlo + xhi) / 2, (ylo + yhi) / 2
+    hx, hy = (xhi - xlo) / 2 * scale, (yhi - ylo) / 2 * scale
+    return np.array([rng.uniform(xc - hx, xc + hx), rng.uniform(yc - hy, yc + hy)])
+
+
 def object_yaw_for_gripper(model, q_arm, site_id):
     """Returns the world-frame yaw (rotation about Z) that aligns the box object's flat faces
     with whichever orientation best_oriented_ik's IK solve actually landed on for this trial.

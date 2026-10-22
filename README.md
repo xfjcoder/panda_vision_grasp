@@ -251,6 +251,38 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    crosses a threshold, so the policy can lock in a working grasp motion before having to
    generalize it across the full table.
 
+7. **Position curriculum (`grasp04`, fresh 1M-step run, `ent_coef=0.01` kept + a
+   `CurriculumCallback` widening `TABLE_XY_RANGE`'s sampled scale 0.15 -> 0.4 -> 0.7 -> 1.0
+   whenever rolling success rate over the last 20+ episodes clears 30%) -- the curriculum
+   mechanism itself verified correct (confirmed via a smoke test forcing `threshold=0.0`,
+   which advanced through all 4 stages as expected), but it never advanced a single stage
+   during the real run: success rate never cleared 30% even at the easiest, narrowest object
+   range. Still **0/20** -- both on the standard full-range eval (expected, since it never
+   trained past the narrow stage) and, more tellingly, on a second eval run at the exact
+   narrow scale (0.15) it actually trained on the whole time. That second number rules out
+   "learned narrow, failed to generalize wide" -- the policy never learned the core
+   descend-close-lift skill at all, even at the easiest difficulty.
+
+   That said, this run is qualitatively different from grasp03: `ep_rew_mean` reached -8.59
+   (the best of any run so far), and eval `drift` values are now consistently nonzero
+   (0.03-0.31m, vs. grasp03's mostly-exact-zero) -- the arm is reaching in and contacting/
+   pushing the object, not just sitting idle. So the distance-minimization part of the
+   behavior clearly improved; it's specifically the precise "close the gripper at the right
+   moment while in contact, then lift without losing it" sequence that's never being
+   discovered.
+
+   **Lesson: the bottleneck isn't task-difficulty breadth (what this curriculum targeted) --
+   it's the fine-grained grasp-closing maneuver itself being too hard to stumble into from
+   sparse reward + pure exploration, within this budget, cold-start.** Four attempts
+   (`grasp01`-`grasp04`) have each correctly diagnosed and fixed a real, distinct problem
+   (partial learning -> exploration collapse -> task scaffolding) without producing a single
+   success -- strong evidence the remaining gap is structural, not a tunable hyperparameter.
+   **Next experiment, not yet tried**: stop iterating on pure cold-start RL hyperparameters:
+   warm-start the policy from Stage 2's already-working scripted trajectory (behavior cloning
+   pretraining, or a residual-RL formulation on top of it), the same fix `barrett_wam` used
+   for its own analogous cold-start RL difficulty -- let RL correct/adapt an already-working
+   grasp motion from pixels, rather than discover the whole thing from scratch.
+
 ## Repository layout
 
 ```

@@ -14,13 +14,21 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, VecNormalize
 
 from grasp_env import GraspPixelEnv
 
 HERE = Path(__file__).parent
+
+# Curriculum stages: object-position range scale (0 = fixed at TABLE_XY_RANGE's center, 1 = full
+# range). grasp03 (ent_coef=0.01, no curriculum) still got 0/20 -- the policy never attempted a
+# grasp at all, with rise staying at noise level across every trial, consistent with the full
+# random-position range from step 0 leaving too little early reward gradient to find the
+# descend-grasp-lift motion in the first place. Start narrow, widen once it's working.
+SCALE_SCHEDULE = [0.15, 0.4, 0.7, 1.0]
 
 
 def linear_schedule(initial):
@@ -29,12 +37,38 @@ def linear_schedule(initial):
     return fn
 
 
-def make_env(seed):
+def make_env(seed, curriculum_scale=1.0):
     def _init():
-        env = GraspPixelEnv()
+        env = GraspPixelEnv(curriculum_scale=curriculum_scale)
         env.reset(seed=seed)
         return env
     return _init
+
+
+class CurriculumCallback(BaseCallback):
+    """Widens every env's object-position range once the rolling success rate (recorded via
+    VecMonitor's info_keywords=("success",)) clears `threshold`."""
+
+    def __init__(self, threshold, check_freq, verbose=1):
+        super().__init__(verbose)
+        self.threshold = threshold
+        self.check_freq = check_freq
+        self.stage = 0
+
+    def _on_step(self):
+        if self.n_calls % self.check_freq != 0 or self.stage >= len(SCALE_SCHEDULE) - 1:
+            return True
+        if len(self.model.ep_info_buffer) < 20:
+            return True
+        success_rate = float(np.mean([ep["success"] for ep in self.model.ep_info_buffer]))
+        if success_rate >= self.threshold:
+            self.stage += 1
+            scale = SCALE_SCHEDULE[self.stage]
+            self.training_env.env_method("set_curriculum_scale", scale)
+            if self.verbose:
+                print(f"curriculum: success_rate={success_rate:.2f} over last "
+                      f"{len(self.model.ep_info_buffer)} eps -> stage {self.stage}, scale={scale}")
+        return True
 
 
 def main():
@@ -47,6 +81,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--gamma", type=float, default=0.98)
     ap.add_argument("--ent-coef", type=float, default=0.0)
+    ap.add_argument("--curriculum", action="store_true")
+    ap.add_argument("--curriculum-threshold", type=float, default=0.3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", type=str, default=None)
     ap.add_argument("--resume-vecnormalize", type=str, default=None)
@@ -57,9 +93,10 @@ def main():
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     (run_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
 
-    env_fns = [make_env(args.seed + i) for i in range(args.n_envs)]
+    initial_scale = SCALE_SCHEDULE[0] if args.curriculum else 1.0
+    env_fns = [make_env(args.seed + i, curriculum_scale=initial_scale) for i in range(args.n_envs)]
     env = SubprocVecEnv(env_fns)
-    env = VecMonitor(env)
+    env = VecMonitor(env, info_keywords=("success",))
     if args.resume_vecnormalize:
         env = VecNormalize.load(args.resume_vecnormalize, env)
         env.training = True
@@ -97,8 +134,11 @@ def main():
         name_prefix="ppo",
         save_vecnormalize=True,
     )
+    callbacks = [checkpoint_cb]
+    if args.curriculum:
+        callbacks.append(CurriculumCallback(threshold=args.curriculum_threshold, check_freq=n_steps))
 
-    model.learn(total_timesteps=args.timesteps, callback=checkpoint_cb)
+    model.learn(total_timesteps=args.timesteps, callback=CallbackList(callbacks))
     model.save(run_dir / "checkpoints" / "final")
     env.save(str(run_dir / "checkpoints" / "vecnormalize_final.pkl"))
     print(f"done, saved to {run_dir}/checkpoints/")
