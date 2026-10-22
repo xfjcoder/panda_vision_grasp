@@ -50,7 +50,7 @@ def main():
     norm_env.training = False
     norm_env.norm_reward = False
 
-    images, proprios, actions = [], [], []
+    images, wrist_images, proprios, actions = [], [], [], []
     n_would_succeed = 0
 
     for ep in range(args.episodes):
@@ -67,6 +67,7 @@ def main():
             expert_action = np.concatenate([delta, [gripper_to_action(ideal_g)]]).astype(np.float32)
 
             images.append(obs["image"])
+            wrist_images.append(obs["wrist_image"])
             proprios.append(obs["proprio"])
             actions.append(expert_action)
 
@@ -85,6 +86,7 @@ def main():
     print(f"collected {len(actions)} DAgger-relabeled transitions over {args.episodes} episodes "
           f"(bc01 itself succeeded on {n_would_succeed}/{args.episodes} of them)")
     np.savez(args.out, images=np.array(images, dtype=np.uint8),
+              wrist_images=np.array(wrist_images, dtype=np.uint8),
               proprio=np.array(proprios, dtype=np.float32),
               actions=np.array(actions, dtype=np.float32))
     env.close()

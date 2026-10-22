@@ -40,7 +40,8 @@ def main():
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
 
     data = np.load(args.demos)
-    images, proprio, demo_actions = data["images"], data["proprio"], data["actions"]
+    images, wrist_images = data["images"], data["wrist_images"]
+    proprio, demo_actions = data["proprio"], data["actions"]
     n = len(demo_actions)
     print(f"loaded {n} demo transitions from {args.demos}")
 
@@ -67,6 +68,7 @@ def main():
             idx = perm[b * args.batch_size:(b + 1) * args.batch_size]
             obs_batch = {
                 "image": images[idx],
+                "wrist_image": wrist_images[idx],
                 "proprio": env.normalize_obs({"proprio": proprio[idx]})["proprio"],
             }
             obs_tensor, _ = policy.obs_to_tensor(obs_batch)

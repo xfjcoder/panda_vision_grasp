@@ -1,8 +1,21 @@
-"""Gymnasium env for the actual project goal: grasp + lift the table-top sphere using ONLY a
-camera image + joint proprioception as observation -- no object position, no contact force, no
+"""Gymnasium env for the actual project goal: grasp + lift the table-top sphere using ONLY
+camera images + joint proprioception as observation -- no object position, no contact force, no
 privileged state of any kind reaches the policy. (Reward computation, during training only,
 freely uses ground-truth object state -- that's standard practice and doesn't leak into what
 the policy itself ever sees.)
+
+**Two cameras as of this stage**: the fixed external `workspace_cam` (the only one used in every
+prior Stage 5 attempt, `bc01`/`bc02`/`grasp01`-`08`) plus the eye-in-hand `wrist_cam` added to
+`panda.xml` for visualization in demo GIFs -- that camera is now ALSO part of the policy's actual
+observation, not just a visualization add-on. Motivated by a concrete, measured finding: `bc02`'s
+alignment offset at the gripper-close phase (0.03-0.12m across several seeds) far exceeds the
+4cm-wide object's 2cm half-width, and judging that offset from a single small, distant blob in a
+64x64 external frame is a much harder estimation problem than from a close, high-resolution
+eye-in-hand view during the precision-critical final approach. This is a clean break from every
+earlier Stage 5 checkpoint's observation space -- `bc01`/`bc02`/`grasp01`-`08` are NOT
+re-evaluable against this env version (their saved networks have no `wrist_image` branch), but
+their results stay documented as-is; this project deliberately doesn't keep a dual code path for
+re-running already-concluded experiments.
 
 **Scope decision, made here rather than left implicit**: the episode starts from a
 `best_oriented_ik`-computed pregrasp posture above the (randomized) object position, not from
@@ -120,6 +133,7 @@ class GraspPixelEnv(gym.Env):
 
         self.observation_space = spaces.Dict({
             "image": spaces.Box(0, 255, (render_size, render_size, 3), dtype=np.uint8),
+            "wrist_image": spaces.Box(0, 255, (render_size, render_size, 3), dtype=np.uint8),
             "proprio": spaces.Box(-np.inf, np.inf, (2 * N_ARM + 1,), dtype=np.float32),
         })
         self.action_space = spaces.Box(-1.0, 1.0, (N_ARM + 1,), dtype=np.float32)
@@ -139,13 +153,18 @@ class GraspPixelEnv(gym.Env):
         return self.data.geom_xpos[self.table_geom][2] + self.model.geom_size[self.table_geom][2]
 
     def _get_obs(self):
+        # Renderer.render() always allocates a fresh array when called with out=None (confirmed
+        # in the mujoco source), so reusing one Renderer for both cameras back to back is safe --
+        # no aliasing between the two returned images.
         self.renderer.update_scene(self.data, camera="workspace_cam")
         image = self.renderer.render()
+        self.renderer.update_scene(self.data, camera="wrist_cam")
+        wrist_image = self.renderer.render()
         gripper_qpos = self.data.qpos[N_ARM] / 0.04  # normalized finger_joint1 position
         proprio = np.concatenate([
             self.data.qpos[:N_ARM], self.data.qvel[:N_ARM], [gripper_qpos],
         ]).astype(np.float32)
-        return {"image": image, "proprio": proprio}
+        return {"image": image, "wrist_image": wrist_image, "proprio": proprio}
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)

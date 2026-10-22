@@ -66,7 +66,7 @@ def main():
     args = ap.parse_args()
 
     env = GraspPixelEnv(curriculum_scale=1.0)
-    images, proprios, actions = [], [], []
+    images, wrist_images, proprios, actions = [], [], [], []
     n_success = 0
 
     for ep in range(args.episodes):
@@ -81,6 +81,7 @@ def main():
             delta = np.clip((q_next - q_target) / MAX_JOINT_RATE, -1.0, 1.0)
             action = np.concatenate([delta, [gripper_to_action(g_next)]]).astype(np.float32)
             images.append(obs["image"])
+            wrist_images.append(obs["wrist_image"])
             proprios.append(obs["proprio"])
             actions.append(action)
             obs, reward, terminated, truncated, info = env.step(action)
@@ -94,6 +95,7 @@ def main():
     print(f"collected {len(actions)} transitions over {args.episodes} episodes, "
           f"{n_success}/{args.episodes} scripted successes")
     np.savez(args.out, images=np.array(images, dtype=np.uint8),
+              wrist_images=np.array(wrist_images, dtype=np.uint8),
               proprio=np.array(proprios, dtype=np.float32),
               actions=np.array(actions, dtype=np.float32))
     env.close()
