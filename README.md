@@ -379,7 +379,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp05` | PPO fine-tuning (1M steps, `ent_coef=0.01`) on top of `bc01`'s checkpoint | 0/20, **worse** than `bc01` alone (rewards mostly -5 to -25) | Fine-tuning didn't correct BC's small errors -- it overwrote the whole gentle approach. Measured directly: `bc01`'s mean per-step joint delta is 0.0088 rad, matching the scripted controller's own pace (0.0119 rad); after fine-tuning it's 0.116 rad, a 13x jump back into the same near-rate-cap regime `grasp04` shows in the GIF above. Nothing in the reward penalizes approach speed, and `gamma=0.98` discounting rewards reaching low distance *sooner* -- PPO found it more rewarding to rush in and knock the object around than to preserve BC's careful alignment |
    | `grasp06` | Proximity-gated approach-speed penalty added to the reward, PPO fine-tune from `bc01` again | 0/20, action magnitude at closest approach unchanged (0.1147 vs `grasp05`'s 0.1097 rad) | Penalty correctly wired (premise check: scripted trajectory reward barely moves, 20.94 vs ~20.8) but its accumulated magnitude over an episode (-0.33) is ~60x smaller than the distance term's (-20.0) -- numerically negligible, not a logic error |
    | `grasp07` | Same as `grasp06` but `W_APPROACH_SPEED` raised 0.1->0.5 (swept and verified, not a naive 60x guess), PPO fine-tune from `bc01` again | 0/20, `drift`~0.0000m (vs `grasp04`/`05`/`06`'s 0.03-0.3m) | New failure mode: the penalty didn't teach a careful approach, it taught retreat. `dist` briefly tightens to 0.10m by step 10-20, then the arm backs off to 0.69m by episode end while action magnitude stays high (mean 1.37) -- cheaper to leave `PROXIMITY_RADIUS` than pay the approach-speed cost, since this policy was never on a path to the terminal bonus anyway |
-   | `grasp08` | Same as `grasp07`, plus a new `W_SMOOTH * ||a_t - a_t-1||^2` action-rate penalty (see below) | Running | -- |
+   | `grasp08` | Same as `grasp07`, plus a new `W_SMOOTH * ||a_t - a_t-1||^2` action-rate penalty (see below) | 0/20, same retreat pattern as `grasp07` (`dist` never drops below its 0.157m start, climbs to 0.27-0.34m); oscillation somewhat reduced (raw smoothness total 168 vs `grasp01`'s 1675) but swamped by the same avoidance behavior | Confirms the failure is the proximity-gated penalty's design, not oscillation -- adding the smoothness fix on top didn't change the core problem |
 
    **Every attempt's rollout, not just one representative GIF** -- same `workspace_cam` view
    the policy itself sees, seed 0 for all seven so the object's start position is identical
@@ -395,6 +395,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp05` | <img src="media/grasp05.gif" width="280"> |
    | `grasp06` | <img src="media/grasp06.gif" width="280"> |
    | `grasp07` | <img src="media/grasp07.gif" width="280"> |
+   | `grasp08` | <img src="media/grasp08.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -435,6 +436,40 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     approach-speed and smoothness fixes together) alongside `grasp07` (approach-speed alone),
     since there's CPU headroom to run both at once (16 cores, each run uses 8).
 
+11. **Both `grasp07` and `grasp08` -- DONE, both 0/20 with a WORSE failure mode than before:
+    the policy stopped approaching the object at all.** Measured the actual distance-to-object
+    trace directly (not just the summary eval numbers): for `grasp07`, `dist` starts at 0.15m
+    (the pregrasp standoff), briefly tightens to 0.10m around step 10-20, then the arm
+    **retreats** to 0.69m by episode end, action magnitude staying high the whole time it's
+    backing away (mean 1.37, near the per-step ceiling). `grasp08` shows the identical shape
+    (`dist` never drops below its 0.157m start, climbs to 0.27-0.34m) -- adding the smoothness
+    fix on top changed the oscillation (raw smoothness total 168 vs. `grasp01`'s 1675) but not
+    this core behavior at all. Both still have `drift`~0.0000m across nearly every eval trial,
+    vs. `grasp04`-`06`'s 0.03-0.3m -- the arm isn't even making contact anymore, let alone
+    pushing the object around.
+
+    **Root cause, found by re-reading what the proximity-gated penalty actually charges for**:
+    `-W_APPROACH_SPEED * proximity * ||action||` is gated on *distance to the object*, not on
+    *whether the arm is approaching or retreating* -- it taxes ANY arm motion while close,
+    including the slow, precise adjustments the real task needs during close-grasp-lift (which
+    all happen within `PROXIMITY_RADIUS` by construction, since `PROXIMITY_RADIUS = STANDOFF`).
+    This is visible even in the premise check: the scripted trajectory's own total reward
+    dropped from ~20.8 (pre-fix) to ~18.9 at `W=0.5` -- a real, non-trivial tax on necessarily-
+    careful, correct motion, not the "barely dents it" framing used when picking that weight.
+    For a policy that has never once reached the terminal bonus, that tax makes leaving the
+    taxed region entirely the better move, every time -- there's no reward gradient pulling it
+    back in to offset the cost. **A penalty gated on proximity alone can't distinguish
+    "rushing toward the object" from "the necessary fine-motor phase," and a policy with no
+    realistic path to success will dodge whichever of the two costs more, not learn to do the
+    expensive one carefully.**
+
+    **Lesson: gate the penalty on the BEHAVIOR being discouraged (closing distance quickly),
+    not on proximity to the goal.** The fix needs to distinguish "distance decreasing fast"
+    (rushing in) from "distance roughly constant or increasing while close" (holding position,
+    fine manipulation, lifting) -- e.g. penalize `max(0, -(dist_t - dist_t-1))` scaled by
+    rate, or only apply `W_APPROACH_SPEED` while `dist` is still shrinking, not whenever the
+    gripper happens to be near the object. **Not yet implemented or discussed with the user.**
+
 ## Repository layout
 
 ```
@@ -464,7 +499,7 @@ panda_vision_grasp/
 │   ├── stage2_reach_grasp.gif
 │   ├── stage5_rl_failure.gif          # grasp04's rollout
 │   ├── bc01.gif, grasp01.gif, grasp02.gif, grasp03.gif,
-│   └── grasp05.gif, grasp06.gif       # every other attempt's rollout, see table above
+│   └── grasp05.gif - grasp08.gif      # every other attempt's rollout, see table above
 ├── requirements.txt
 └── README.md
 ```
