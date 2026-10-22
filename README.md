@@ -204,6 +204,28 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    was resolved by scaling up budget before any bigger redesign was needed -- tried next here
    too, see below.
 
+5. **Scaled up 4x (`grasp02`, resumed from `grasp01`'s checkpoint, +3M timesteps = 4M total)
+   -- negative result: more budget alone did NOT help here, unlike `barrett_wam`'s analogous
+   case.** Same training recipe, no reward/hyperparameter changes. Result: **still 0/20**,
+   training reward actually *regressed* partway through (climbed to -9.4 around the 1.5M-step
+   mark, then drifted down to -12 by the end) rather than continuing to improve or even
+   plateauing cleanly.
+
+   **Diagnosed, not just reported as a flat "didn't work"**: the policy's action-distribution
+   `std` collapsed hard and fast throughout this run (0.43 -> 0.06), while `approx_kl` stayed
+   persistently far above PPO's normal healthy range (0.8-1.6, vs. a typical 0.01-0.05) for
+   the entire 3M timesteps -- a small std mechanically inflates measured KL for the same
+   underlying policy shift, which is consistent with premature exploration collapse: the
+   policy became highly confident in a specific behavior (descend-but-don't-center) very
+   early and stopped exploring away from it, rather than genuinely converging on a good one.
+   `ent_coef=0.0` (this project's and `barrett_wam`'s shared convention, chosen there
+   specifically because nonzero `ent_coef` risked a policy-std *blowup* on that lower-dimensional
+   MLP policy) looks like the wrong default for this much higher-dimensional CNN-based policy
+   on a harder task -- the two projects' policies apparently sit on opposite sides of the same
+   knob. **Next experiment, not yet tried**: a small nonzero `ent_coef` (e.g. 0.01) to keep
+   exploration alive longer, rather than further scaling the same recipe that already showed
+   it won't self-correct.
+
 ## Repository layout
 
 ```
