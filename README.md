@@ -283,6 +283,23 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    for its own analogous cold-start RL difficulty -- let RL correct/adapt an already-working
    grasp motion from pixels, rather than discover the whole thing from scratch.
 
+   <p align="center">
+     <img src="media/stage5_rl_failure.gif" width="480" alt="Trained RL policy (grasp04) descending toward the object, nudging it sideways, then neither closing the gripper around it nor lifting it, viewed from the fixed workspace camera">
+   </p>
+
+   **What the failure actually looks like** (`grasp04`, seed 0, same view the policy itself
+   sees): the arm descends and makes contact with the object -- it clearly isn't flailing or
+   idle -- but drifts it sideways (`drift=0.106m`) rather than centering, closing, and lifting.
+   This is representative of all four runs' shared shape: real, visible progress on
+   reach-and-approach, with the precise close-then-lift sequence never discovered.
+
+   | Run | Change tested | Result | Root cause identified |
+   |---|---|---|---|
+   | `grasp01` | First training, 1M steps | 0/20, reward -12.7 (up from ~-24 random) | Genuine partial learning, not yet enough -- descends near the object but doesn't center/time the grasp |
+   | `grasp02` | Scaled to 4M steps (same recipe) | 0/20, reward regressed to -12 | Exploration collapse: action-std fell 0.43->0.06 while `approx_kl` stayed abnormally high (0.8-1.6) the whole run -- policy locked onto a bad behavior early, `ent_coef=0.0` (right for `barrett_wam`'s MLP, wrong for this CNN policy) let it happen |
+   | `grasp03` | `ent_coef=0.01` | 0/20, reward -8.59 best segment, but `rise`~0 every trial | Collapse fixed (`std` held ~1.2-1.3) but policy never attempts a grasp at all -- full-difficulty random positions from step 0 left too little early reward gradient |
+   | `grasp04` | Position curriculum (0.15->1.0 scale) on top of `ent_coef=0.01` | 0/20 at full range AND at the narrow scale actually trained on | Not a generalization gap -- the core descend-close-lift skill was never learned even at the easiest difficulty; the grasp-closing maneuver itself is the bottleneck, not task-difficulty breadth |
+
 ## Repository layout
 
 ```
@@ -300,12 +317,17 @@ panda_vision_grasp/
 ├── grasp_env.py                      # Stage 3: pixels-to-actions Gym env, see writeup above
 ├── train.py                          # Stage 4: PPO training, see README's RL section
 ├── eval_policy.py                    # Stage 4: 20-trial held-out eval for a trained policy
+├── collect_demos.py                  # Stage 5: BC dataset from the scripted controller
+├── train_bc.py                       # Stage 5: behavior-cloning pretrain on PPO's own network
 ├── runs/                             # training checkpoints/logs (gitignored, not committed)
+├── data/                             # BC demo datasets (gitignored, not committed)
 ├── demo_stage1_kinematic_sweep.py    # Stage 1: verification sweep, see media/ GIF above
 ├── demo_stage2_reach_grasp.py        # Stage 2: scripted grasp demo, see media/ GIF above
+├── demo_stage5_rl_failure.py         # Stage 5: renders a trained RL policy's failure mode
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
-│   └── stage2_reach_grasp.gif
+│   ├── stage2_reach_grasp.gif
+│   └── stage5_rl_failure.gif
 ├── requirements.txt
 └── README.md
 ```
