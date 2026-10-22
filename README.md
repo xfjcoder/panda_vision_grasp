@@ -283,6 +283,38 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    for its own analogous cold-start RL difficulty -- let RL correct/adapt an already-working
    grasp motion from pixels, rather than discover the whole thing from scratch.
 
+8. **Behavior cloning + PPO fine-tuning (`bc01` then `grasp05`) -- DONE, a genuinely new
+   failure mode identified: the warm-start worked, the fine-tuning erased it.**
+   `collect_demos.py` replayed Stage 2's scripted controller through `GraspPixelEnv`'s exact
+   observation/action pipeline (200/200 scripted successes, full object-position range, not the
+   narrow curriculum), producing 24,000 (image, proprio, action) transitions. `train_bc.py`
+   supervised the same PPO policy architecture's action-mean against those demonstrations via
+   plain MSE (no environment interaction) -- loss dropped cleanly from 0.09 to 0.002 over 20
+   epochs. `bc01` alone: still 0/20, but the best result of any run -- small positive `rise`
+   on several trials, much better rewards, and (measured directly) a per-step joint-delta
+   magnitude of 0.0088 rad, matching the scripted controller's own 0.0119 rad pace almost
+   exactly. BC genuinely learned the gentle, precise approach.
+
+   `grasp05` then fine-tuned that checkpoint with PPO (1M steps, `ent_coef=0.01`, same
+   VecNormalize stats carried over) -- still 0/20, but **worse** than `bc01` alone, not better.
+   Measured the same per-step joint-delta metric: fine-tuning pushed it from 0.0088 to 0.116
+   rad, a 13x jump landing back in the same near-saturated regime `grasp04`'s failure GIF
+   shows. **Root cause, not just correlation**: nothing in the reward penalizes how fast the
+   arm approaches -- the action-magnitude term (`W_ACTION=0.001`) is deliberately tiny (same
+   reward-hacking-avoidance choice as the distance term), and `gamma=0.98` discounting rewards
+   reaching low distance *sooner* rather than carefully. PPO fine-tuning found it more
+   rewarding to rush toward the object and knock it around than to preserve BC's careful,
+   slow alignment -- it didn't correct BC's small residual errors (the intended use of RL
+   fine-tuning on a good init), it overwrote the whole behavior.
+
+   **Lesson: a warm-start only survives RL fine-tuning if the reward doesn't actively reward
+   abandoning it.** The missing piece isn't exploration, scaffolding, or initialization
+   anymore -- it's that nothing in `GraspPixelEnv`'s reward distinguishes a careful approach
+   from a reckless one. **Next experiment, not yet tried**: add an approach-speed penalty
+   (e.g. an action-magnitude cost that scales up specifically when `dist` is small, rather
+   than a uniform one that would also slow down the reach phase), and/or lower
+   `MAX_JOINT_RATE` itself so fast, careless motion isn't available to the policy at all.
+
    <p align="center">
      <img src="media/stage5_rl_failure.gif" width="480" alt="Trained RL policy (grasp04) descending toward the object, nudging it sideways, then neither closing the gripper around it nor lifting it, viewed from the fixed workspace camera">
    </p>
@@ -299,6 +331,8 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp02` | Scaled to 4M steps (same recipe) | 0/20, reward regressed to -12 | Exploration collapse: action-std fell 0.43->0.06 while `approx_kl` stayed abnormally high (0.8-1.6) the whole run -- policy locked onto a bad behavior early, `ent_coef=0.0` (right for `barrett_wam`'s MLP, wrong for this CNN policy) let it happen |
    | `grasp03` | `ent_coef=0.01` | 0/20, reward -8.59 best segment, but `rise`~0 every trial | Collapse fixed (`std` held ~1.2-1.3) but policy never attempts a grasp at all -- full-difficulty random positions from step 0 left too little early reward gradient |
    | `grasp04` | Position curriculum (0.15->1.0 scale) on top of `ent_coef=0.01` | 0/20 at full range AND at the narrow scale actually trained on | Not a generalization gap -- the core descend-close-lift skill was never learned even at the easiest difficulty; the grasp-closing maneuver itself is the bottleneck, not task-difficulty breadth |
+   | `bc01` | Behavior cloning on Stage 2's scripted controller (200/200 demo episodes, no RL at all) | 0/20, but qualitatively the best result so far: several trials showed small positive `rise` (up to 0.0115m, vs. every RL run's flat zero/negative), rewards mostly -2 to -14 | Classic BC compounding-error: imitates the demonstrator well locally but never saw how to recover from small deviations, so drifts off-distribution before completing the sequence |
+   | `grasp05` | PPO fine-tuning (1M steps, `ent_coef=0.01`) on top of `bc01`'s checkpoint | 0/20, **worse** than `bc01` alone (rewards mostly -5 to -25) | Fine-tuning didn't correct BC's small errors -- it overwrote the whole gentle approach. Measured directly: `bc01`'s mean per-step joint delta is 0.0088 rad, matching the scripted controller's own pace (0.0119 rad); after fine-tuning it's 0.116 rad, a 13x jump back into the same near-rate-cap regime `grasp04` shows in the GIF above. Nothing in the reward penalizes approach speed, and `gamma=0.98` discounting rewards reaching low distance *sooner* -- PPO found it more rewarding to rush in and knock the object around than to preserve BC's careful alignment |
 
 ## Repository layout
 

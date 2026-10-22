@@ -111,7 +111,10 @@ def main():
         print(f"n_steps*n_envs not divisible by batch_size, using batch_size={batch_size}")
 
     if args.resume:
-        model = PPO.load(args.resume, env=env, device="cpu",
+        # verbose is a saved constructor arg -- override explicitly, or a checkpoint made with
+        # verbose=0 (e.g. train_bc.py's BC phase) silently carries that into every future
+        # resume, with no progress tables printed and no indication training isn't just hung.
+        model = PPO.load(args.resume, env=env, device="cpu", verbose=1,
                           learning_rate=linear_schedule(args.lr))
         print(f"resumed from {args.resume}")
     else:
