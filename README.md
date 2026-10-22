@@ -382,6 +382,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp06` | Proximity-gated approach-speed penalty added to the reward, PPO fine-tune from `bc01` again | 0/20, action magnitude at closest approach unchanged (0.1147 vs `grasp05`'s 0.1097 rad) | Penalty correctly wired (premise check: scripted trajectory reward barely moves, 20.94 vs ~20.8) but its accumulated magnitude over an episode (-0.33) is ~60x smaller than the distance term's (-20.0) -- numerically negligible, not a logic error |
    | `grasp07` | Same as `grasp06` but `W_APPROACH_SPEED` raised 0.1->0.5 (swept and verified, not a naive 60x guess), PPO fine-tune from `bc01` again | 0/20, `drift`~0.0000m (vs `grasp04`/`05`/`06`'s 0.03-0.3m) | New failure mode: the penalty didn't teach a careful approach, it taught retreat. `dist` briefly tightens to 0.10m by step 10-20, then the arm backs off to 0.69m by episode end while action magnitude stays high (mean 1.37) -- cheaper to leave `PROXIMITY_RADIUS` than pay the approach-speed cost, since this policy was never on a path to the terminal bonus anyway |
    | `grasp08` | Same as `grasp07`, plus a new `W_SMOOTH * ||a_t - a_t-1||^2` action-rate penalty (see below) | 0/20, same retreat pattern as `grasp07` (`dist` never drops below its 0.157m start, climbs to 0.27-0.34m); oscillation somewhat reduced (raw smoothness total 168 vs `grasp01`'s 1675) but swamped by the same avoidance behavior | Confirms the failure is the proximity-gated penalty's design, not oscillation -- adding the smoothness fix on top didn't change the core problem |
+   | `bc02` | One DAgger round on `bc01`: relabeled 200 `bc01`-driven rollouts with fresh expert corrections, merged with the original 24k demos (48k total), retrained from scratch | 0/20, mean reward WORSE than `bc01` (-18.2 vs -8.8), but best trial's `rise` 2.4x higher (0.0282m vs 0.0115m) with visually confirmed correct centering at the close phase | Fixed the targeted compounding-drift/alignment problem (confirmed via wrist-cam frames) but the correction labels are inherently noisier/larger than the original smooth demos, teaching a noisier overall policy (sign-flip rate 0.56 vs `bc01`'s 0.02) -- net regression on average despite fixing the specific failure mode |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
    `workspace_cam` (left, the view the policy itself sees) and `wrist_cam` (right, an
@@ -400,6 +401,8 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp06` | <img src="media/grasp06.gif" width="280"> |
    | `grasp07` | <img src="media/grasp07.gif" width="280"> |
    | `grasp08` | <img src="media/grasp08.gif" width="280"> |
+   | `bc02` (seed 0) | <img src="media/bc02.gif" width="280"> |
+   | `bc02` (seed 18, best case -- object correctly centered at close phase) | <img src="media/bc02_best_case.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -472,7 +475,61 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     (rushing in) from "distance roughly constant or increasing while close" (holding position,
     fine manipulation, lifting) -- e.g. penalize `max(0, -(dist_t - dist_t-1))` scaled by
     rate, or only apply `W_APPROACH_SPEED` while `dist` is still shrinking, not whenever the
-    gripper happens to be near the object. **Not yet implemented or discussed with the user.**
+    gripper happens to be near the object.
+
+13. **Pivot: fix BC's own failure before touching RL again.** Inspecting `bc01`'s GIF frame by
+    frame (user's own observation, comparing against `stage2_reach_grasp.gif`'s successful
+    scripted pickup) showed the real problem isn't grasp *timing* -- `bc01` reproduces the
+    descend/close/lift phase schedule almost exactly -- it's spatial *alignment*: by the close
+    phase, the object (only 4cm wide) sits outside the finger line entirely, so the gripper
+    closes on empty space next to it, not around it. Classic BC compounding error: the network
+    was only ever trained on states the expert itself visited (always perfectly centered),
+    never on "slightly off-center, here's the correction" states, so its own small prediction
+    errors drift it off that exact path with no learned way back. Every RL fine-tune so far
+    (`grasp05`-`08`) made this worse, not better, because there was never a working behavior to
+    anchor to -- fixing BC first, then letting RL polish an already-working policy, is a much
+    better-posed problem (matches `barrett_wam`'s own successful residual-RL-on-a-working-
+    baseline precedent, vs. every cold-start attempt here failing).
+
+    **Fix: one round of DAgger (`collect_dagger.py`, commit pending).** Rolled out `bc01`'s own
+    policy (not the scripted controller) so the visited states are the ones it actually drifts
+    into, then relabeled each one with a fresh expert correction computed from the scripted
+    controller's absolute, time-indexed joint-target schedule against the policy's actual
+    (possibly already-drifted) current joint target -- `expert_action = clip((ideal_q_t -
+    actual_q_target) / MAX_JOINT_RATE, -1, 1)`. This only works cheaply because the expert
+    query (IK against ground-truth object position) can be run from any current arm state, not
+    just the original fixed trajectory. Collected 24,000 new transitions over 200 `bc01`-driven
+    episodes (0/200 succeeded, as expected), merged with the original 24,000 scripted-only
+    transitions into a 48,000-transition aggregate dataset, and retrained from scratch as
+    `bc02` (same `train_bc.py`, unmodified).
+
+    **Result: a genuine, visually-confirmed fix for the targeted problem, but a net regression
+    overall -- still 0/20.** The alignment problem is clearly fixed on the cases where it
+    mattered: `bc02`'s best trial (seed 18) shows the object fully centered between the finger
+    pads at the close phase (`media/bc02_best_case.gif`, wrist view) -- compare directly against
+    `bc01`'s same-phase frame, where the object sits entirely outside the jaws. `rise` on that
+    trial reached 0.0282m, 2.4x `bc01`'s previous best (0.0115m), and `object z` was directly
+    measured rising ~0.02m during the lift phase (not just noise). But averaged over 20 trials,
+    `bc02` is WORSE than `bc01`: mean reward -18.2 vs. -8.8, only 2/20 trials showing any
+    positive `rise` at all (vs. 4/20 for `bc01`), and `drift` far larger and more variable
+    (up to 0.25m, vs. `bc01`'s mostly-near-zero). **Root cause**: the DAgger-relabeled
+    correction actions are inherently larger and more varied in direction than the original
+    smooth demo actions (mean|action| 0.62 during collection vs. the original dataset's much
+    smaller, consistent values) -- training on this noisier, more diverse label distribution
+    produced a policy with 7x higher action magnitude and a sign-flip rate of 0.56 (vs.
+    `bc01`'s 0.02, closer to `grasp01`'s worst-oscillator 0.68 than to a clean demo). Directly
+    measured on the lifted-object trial: the gripper CLOSE command itself oscillates noisily
+    post-close (toggling between ~0 and ~10, not holding a clean constant value), and even its
+    best achieved physical closure (finger qpos ~0.02 per side) just barely matches the box's
+    full width with no grip margin -- enough to lift 2cm before losing purchase, not the 9cm
+    needed for success.
+
+    **Lesson: DAgger fixed the problem it targeted (spatial alignment / compounding drift) but
+    introduced a new one (noisy, high-magnitude corrections teach a noisier policy overall) --
+    confirms this needs either a second DAgger round that also controls for action smoothness
+    (e.g. oversampling the original clean demos relative to corrections, or correction actions
+    computed with a smaller effective gain so they're less jarring), or a fix aimed specifically
+    at the gripper-closing margin/stability. Not yet implemented or discussed with the user.**
 
 ## Repository layout
 
@@ -492,6 +549,7 @@ panda_vision_grasp/
 ├── train.py                          # Stage 4: PPO training, see README's RL section
 ├── eval_policy.py                    # Stage 4: 20-trial held-out eval for a trained policy
 ├── collect_demos.py                  # Stage 5: BC dataset from the scripted controller
+├── collect_dagger.py                 # Stage 5: DAgger correction pass on a trained BC policy
 ├── train_bc.py                       # Stage 5: behavior-cloning pretrain on PPO's own network
 ├── runs/                             # training checkpoints/logs (gitignored, not committed)
 ├── data/                             # BC demo datasets (gitignored, not committed)
@@ -501,7 +559,7 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01.gif, grasp01.gif - grasp08.gif   # every attempt's rollout, dual-view, see table above
+│   └── bc01.gif, bc02.gif, bc02_best_case.gif, grasp01.gif - grasp08.gif   # every attempt's rollout, dual-view, see table above
 ├── requirements.txt
 └── README.md
 ```
