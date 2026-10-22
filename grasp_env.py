@@ -55,7 +55,19 @@ TERMINAL_BONUS = 20.0
 # reach phase. This term only activates within PROXIMITY_RADIUS of the object, scaling up as
 # the gripper gets closer, so the reach phase is untouched but a careless final approach isn't.
 PROXIMITY_RADIUS = STANDOFF  # 0.15m -- same scale Stage 2's own pregrasp standoff uses
-W_APPROACH_SPEED = 0.1
+# grasp06's single-episode breakdown (dist -20.0 vs approach -0.33) suggested a ~60x weight
+# bump, but that ratio isn't stable across episodes -- it depends heavily on how long the
+# rollout actually spends inside PROXIMITY_RADIUS, which differs a lot between a successful
+# (long dwell) and a failed (barely gets close) trajectory. A weight sweep against BOTH the
+# scripted trajectory (10 seeds, must stay successful with reward not far off its ~20.8
+# baseline) and grasp06's own real rollout (10 seeds, want its approach-speed total to become
+# comparable to its distance total, not swamp it or stay negligible) found W=0.5: scripted
+# stays 10/10 at reward~19.1 (barely down from ~20.8), while grasp06's approach-speed total
+# (-14.6) is now the same order of magnitude as its distance total (-12.4), a real competing
+# incentive -- unlike the naive 60x scale-up (W=6.0), which also blows up the scripted
+# trajectory's reward to -11.8 despite it still succeeding, because the 60x ratio measured on
+# one failed episode doesn't generalize to a successful one's much longer proximity dwell time.
+W_APPROACH_SPEED = 0.5
 
 
 class GraspPixelEnv(gym.Env):

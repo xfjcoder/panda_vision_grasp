@@ -338,10 +338,26 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    distance term is automatically dominated by it, roughly in proportion to how much of the
    episode each one is active for.** A fix needs a substantially larger weight (not the same
    order of magnitude as `W_DIST`), or a different mechanism that doesn't have to outweigh an
-   accumulated 120-step term from a handful of steps near contact. **Next experiment, not yet
-   tried**: increase `W_APPROACH_SPEED` by roughly the same ratio the two totals were off by
-   (~60x, so on the order of 5-10 rather than 0.1), and re-verify with the same reward-component
-   breakdown before spending training compute again.
+   accumulated 120-step term from a handful of steps near contact.
+
+   **Before spending training compute on a re-weighted guess, swept it properly instead of
+   just multiplying by 60x.** That single-episode 60x ratio turned out not to generalize: it
+   depends heavily on how long a rollout spends inside `PROXIMITY_RADIUS`, which differs a lot
+   between a *successful* trajectory (long dwell -- descend, close, hold, lift all happen
+   close to the object) and a *failed* one (barely gets close at all). Swept
+   `W_APPROACH_SPEED` in `{0.1, 0.3, 0.4, 0.5, 1.0, 2.0, 3.0, 6.0}` against **both** the
+   scripted trajectory (10 seeds -- must stay successful, reward shouldn't move far from its
+   ~20.8 baseline) and `grasp06`'s own real rollout (10 seeds -- want its approach-speed total
+   to become comparable to its distance total, not stay negligible). The naive `W=6.0` does
+   blow up the fast policy's penalty, but it blows up the scripted trajectory's just as much
+   (reward -11.8, down from +21.2, despite still succeeding) -- confirming the 60x ratio was
+   an artifact of comparing a failed episode's short dwell time against an assumed-equivalent
+   successful one. **`W=0.5`** is the actual balance point: scripted stays 10/10 at
+   reward~19.1 (barely down from ~20.8), while `grasp06`'s approach-speed total (-14.6) is now
+   the same order of magnitude as its distance total (-12.4) instead of ~0.33 vs -20 -- a real
+   competing incentive against rushing, without wrecking the careful baseline it has to coexist
+   with. Set `W_APPROACH_SPEED = 0.5` in `grasp_env.py` and launched `grasp07` (same recipe as
+   `grasp05`/`grasp06`: PPO fine-tune from `bc01`, `ent_coef=0.01`, 1M steps).
 
    <p align="center">
      <img src="media/stage5_rl_failure.gif" width="480" alt="Trained RL policy (grasp04) descending toward the object, nudging it sideways, then neither closing the gripper around it nor lifting it, viewed from the fixed workspace camera">
@@ -362,6 +378,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc01` | Behavior cloning on Stage 2's scripted controller (200/200 demo episodes, no RL at all) | 0/20, but qualitatively the best result so far: several trials showed small positive `rise` (up to 0.0115m, vs. every RL run's flat zero/negative), rewards mostly -2 to -14 | Classic BC compounding-error: imitates the demonstrator well locally but never saw how to recover from small deviations, so drifts off-distribution before completing the sequence |
    | `grasp05` | PPO fine-tuning (1M steps, `ent_coef=0.01`) on top of `bc01`'s checkpoint | 0/20, **worse** than `bc01` alone (rewards mostly -5 to -25) | Fine-tuning didn't correct BC's small errors -- it overwrote the whole gentle approach. Measured directly: `bc01`'s mean per-step joint delta is 0.0088 rad, matching the scripted controller's own pace (0.0119 rad); after fine-tuning it's 0.116 rad, a 13x jump back into the same near-rate-cap regime `grasp04` shows in the GIF above. Nothing in the reward penalizes approach speed, and `gamma=0.98` discounting rewards reaching low distance *sooner* -- PPO found it more rewarding to rush in and knock the object around than to preserve BC's careful alignment |
    | `grasp06` | Proximity-gated approach-speed penalty added to the reward, PPO fine-tune from `bc01` again | 0/20, action magnitude at closest approach unchanged (0.1147 vs `grasp05`'s 0.1097 rad) | Penalty correctly wired (premise check: scripted trajectory reward barely moves, 20.94 vs ~20.8) but its accumulated magnitude over an episode (-0.33) is ~60x smaller than the distance term's (-20.0) -- numerically negligible, not a logic error |
+   | `grasp07` | Same as `grasp06` but `W_APPROACH_SPEED` raised 0.1->0.5 (swept and verified, not a naive 60x guess), PPO fine-tune from `bc01` again | Running | -- |
 
    **Every attempt's rollout, not just one representative GIF** -- same `workspace_cam` view
    the policy itself sees, seed 0 for all seven so the object's start position is identical
