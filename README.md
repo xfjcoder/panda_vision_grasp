@@ -315,6 +315,34 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    than a uniform one that would also slow down the reach phase), and/or lower
    `MAX_JOINT_RATE` itself so fast, careless motion isn't available to the policy at all.
 
+9. **Approach-speed penalty (`grasp06`, PPO fine-tune from `bc01` again, with a
+   proximity-gated `-W_APPROACH_SPEED * proximity * ||action||` term added to the reward) --
+   DONE, mechanism confirmed correctly implemented but weighted far too weakly to matter.**
+   Kept `MAX_JOINT_RATE` unchanged deliberately (lowering it would have silently rescaled
+   `bc01`'s already-correct, validated action calibration -- its raw outputs were learned
+   against the current rate constant). Premise-checked before training: replaying the scripted
+   trajectory still gives `success=True`, reward 20.94 (vs. ~20.8 pre-change) -- the new term
+   barely dents a genuinely careful trajectory, as intended.
+
+   Result: still **0/20**, and the fix didn't actually change behavior -- measured directly,
+   action magnitude at each episode's closest approach to the object was 0.1147 rad for
+   `grasp06` vs. 0.1097 for `grasp05`, i.e. no improvement (if anything, slightly worse).
+   **Root cause, found by breaking the reward into its components over a real rollout**: the
+   penalty activates correctly, but its total contribution over an episode (`-0.33`) is
+   dwarfed by the distance term's (`-20.0`) by roughly 60x -- the gripper is only within
+   `PROXIMITY_RADIUS` for a handful of the 120 steps, and even there `W_APPROACH_SPEED=0.1`
+   produces a per-step penalty of ~0.02-0.03, far too small to compete against an episode-long
+   incentive to approach fast.
+
+   **Lesson: a proximity-gated penalty applied with the same weight scale as the always-on
+   distance term is automatically dominated by it, roughly in proportion to how much of the
+   episode each one is active for.** A fix needs a substantially larger weight (not the same
+   order of magnitude as `W_DIST`), or a different mechanism that doesn't have to outweigh an
+   accumulated 120-step term from a handful of steps near contact. **Next experiment, not yet
+   tried**: increase `W_APPROACH_SPEED` by roughly the same ratio the two totals were off by
+   (~60x, so on the order of 5-10 rather than 0.1), and re-verify with the same reward-component
+   breakdown before spending training compute again.
+
    <p align="center">
      <img src="media/stage5_rl_failure.gif" width="480" alt="Trained RL policy (grasp04) descending toward the object, nudging it sideways, then neither closing the gripper around it nor lifting it, viewed from the fixed workspace camera">
    </p>

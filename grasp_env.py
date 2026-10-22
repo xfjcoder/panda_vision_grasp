@@ -46,6 +46,17 @@ W_HEIGHT = 0.5
 W_ACTION = 0.001
 TERMINAL_BONUS = 20.0
 
+# grasp05 (PPO fine-tuning on a behavior-cloned checkpoint) measurably pushed the policy's
+# per-step action magnitude 13x higher than the demonstrator's own pace (0.0088 -> 0.116 rad),
+# reproducing the same "rush in and knock the object sideways" failure grasp04's GIF shows --
+# because nothing in the reward above penalizes HOW the arm approaches, only distance and
+# height. W_ACTION alone can't fix this: it's uniform over the whole episode, so raising it
+# enough to matter near the object would also penalize the (necessary, and fine as-is) fast
+# reach phase. This term only activates within PROXIMITY_RADIUS of the object, scaling up as
+# the gripper gets closer, so the reach phase is untouched but a careless final approach isn't.
+PROXIMITY_RADIUS = STANDOFF  # 0.15m -- same scale Stage 2's own pregrasp standoff uses
+W_APPROACH_SPEED = 0.1
+
 
 class GraspPixelEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -168,7 +179,11 @@ class GraspPixelEnv(gym.Env):
         rise = obj_pos[2] - self.obj_pos0[2]
         drift = np.linalg.norm(obj_pos[:2] - self.obj_pos0[:2])
 
-        reward = -W_DIST * dist + W_HEIGHT * max(0.0, rise) - W_ACTION * float(np.sum(action ** 2))
+        proximity = max(0.0, 1.0 - dist / PROXIMITY_RADIUS)
+        arm_action_mag = float(np.linalg.norm(action[:N_ARM]))
+        reward = (-W_DIST * dist + W_HEIGHT * max(0.0, rise)
+                  - W_ACTION * float(np.sum(action ** 2))
+                  - W_APPROACH_SPEED * proximity * arm_action_mag)
         terminated = self.t >= EPISODE_STEPS
         success = bool(rise > SUCCESS_RISE_FRAC * LIFT_HEIGHT and drift < SUCCESS_DRIFT_MAX)
         if terminated and success:
