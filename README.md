@@ -165,8 +165,44 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    terminal bonus) -- confirming the env's physics, reward wiring, and action/observation
    plumbing are all correct before any policy has been trained on it.
 
-   PPO training itself (via `stable_baselines3`, matching every sibling project's conventions)
-   is the next piece of work, not yet started.
+4. **First PPO training run (`grasp01`) -- DONE, honest partial result: 0/20, real but
+   insufficient learning.** `train.py` mirrors `barrett_wam`/`go1_rl_walk`'s own conventions
+   (PPO + `SubprocVecEnv` + `VecMonitor` + `VecNormalize`, per-run `args.json`), with two
+   changes for a `Dict{image, proprio}` observation: `"MultiInputPolicy"` instead of
+   `"MlpPolicy"`, and `norm_obs_keys=["proprio"]` so `VecNormalize`'s running-mean/std
+   normalization is applied only to proprioception -- normalizing raw image pixels too would
+   feed the CNN extractor's built-in `/255` assumption the wrong distribution entirely.
+
+   **Found and fixed a rendering-speed bug before launching any real training budget.**
+   Benchmarked raw env throughput first (same "verify premise" discipline as
+   `barrett_wam`'s residual-RL check): only ~46 renders/sec no matter the resolution tried
+   (32-64px) or how many parallel envs were used (8 or 14 gave the *same* total throughput,
+   not more -- a shared-GPU-context bottleneck, not a CPU one, confirmed via a single-process
+   render-loop benchmark landing at the identical number). Traced to shadow-map rendering
+   specifically (an extra render pass MuJoCo does for cast shadows): disabling it
+   (`model.light_castshadow[:] = 0` in `GraspPixelEnv.__init__`) gave a confirmed **~13x
+   speedup** (46 -> 630 renders/sec) -- a policy that only ever sees pixels has no need to
+   interpret shadows anyway. Also fixed a crash found via a short smoke-training run (the
+   actual "verify before scaling" check): `best_oriented_ik` occasionally finds no valid
+   candidate for an unlucky random table position -- never hit in Stage 2's fixed 20-seed
+   sweep, but real across training's much wider resampling (confirmed: it crashed a
+   `SubprocVecEnv` worker on exactly this). Fixed by resampling the object position and
+   retrying instead of letting one unlucky position crash an entire run.
+
+   **Result** (1M timesteps, 8 parallel envs, ~430->270 fps as other load on the machine
+   varied): episode reward climbed from the random-policy baseline (~-20 to -27) to **-12.7**
+   over training -- a genuine, large improvement, not noise. `eval_policy.py` (same
+   `random_table_xy` seed convention as `eval_stage2_reach_grasp.py`, so the two numbers are
+   directly comparable): **0/20** succeeded. Rendering a held-out rollout showed why: the
+   policy reliably learned to descend the arm down to table height near the object (not
+   flailing randomly), but doesn't reliably center the gripper on it or time the close/lift
+   -- it drifts past the object rather than grasping it. The same shape of result
+   `barrett_wam` hit on its own first RL attempts (real, partial learning, not yet enough to
+   succeed), on a problem that's strictly harder here: full reach+grasp+lift from raw pixels,
+   cold-start, no privileged-state residual baseline to correct like `barrett_wam` eventually
+   used. `barrett_wam`'s own directly analogous finding ("more data and time: 2/20 -> 4/20")
+   was resolved by scaling up budget before any bigger redesign was needed -- tried next here
+   too, see below.
 
 ## Repository layout
 
@@ -183,6 +219,9 @@ panda_vision_grasp/
 ├── control.py                        # Stage 2: gravity-compensation feedforward
 ├── eval_stage2_reach_grasp.py        # Stage 2: 20-trial scripted reach/grasp/lift sanity check
 ├── grasp_env.py                      # Stage 3: pixels-to-actions Gym env, see writeup above
+├── train.py                          # Stage 4: PPO training, see README's RL section
+├── eval_policy.py                    # Stage 4: 20-trial held-out eval for a trained policy
+├── runs/                             # training checkpoints/logs (gitignored, not committed)
 ├── demo_stage1_kinematic_sweep.py    # Stage 1: verification sweep, see media/ GIF above
 ├── demo_stage2_reach_grasp.py        # Stage 2: scripted grasp demo, see media/ GIF above
 ├── media/

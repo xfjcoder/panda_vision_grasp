@@ -53,6 +53,11 @@ class GraspPixelEnv(gym.Env):
     def __init__(self, render_size=IMG_SIZE):
         super().__init__()
         self.model = mj.MjModel.from_xml_path(SCENE)
+        # Shadow mapping turned out to be the dominant cost of rendering on this machine's
+        # integrated GPU -- confirmed directly: ~47 renders/sec with it on vs. ~630/sec with it
+        # off, at any resolution tried (32-64px), so it wasn't a fill-rate cost. A ~13x speedup
+        # for a policy that never needs to interpret shadows anyway.
+        self.model.light_castshadow[:] = 0
         self.data = mj.MjData(self.model)
         self.render_size = render_size
         self.renderer = mj.Renderer(self.model, height=render_size, width=render_size)
@@ -106,11 +111,25 @@ class GraspPixelEnv(gym.Env):
         self.data.qpos[self.obj_qadr + 3:self.obj_qadr + 7] = [1, 0, 0, 0]
         mj.mj_forward(self.model, self.data)
 
-        obj_xy = random_table_xy(rng)
         table_top_z = self._table_top_z()
-        self.obj_pos0 = np.array([obj_xy[0], obj_xy[1], table_top_z + self.obj_half_height])
-        above = self.obj_pos0 + np.array([0, 0, STANDOFF])
-        q_pregrasp, _ = best_oriented_ik(self.model, above, rng, descend_check_pos=self.obj_pos0)
+        # best_oriented_ik occasionally finds no candidate at all (none of n_candidates=40
+        # random restarts both reach the target AND clear the table-contact check) -- rare
+        # enough that eval_stage2_reach_grasp.py's own fixed 20-seed sweep never hit it, but
+        # real during training's much wider resampling across random seeds (confirmed: a
+        # SubprocVecEnv auto-reset crashed on exactly this, `best_q=None`). Resample a new
+        # object position and retry rather than let a single unlucky table position crash an
+        # entire training run.
+        for _ in range(10):
+            obj_xy = random_table_xy(rng)
+            obj_pos0 = np.array([obj_xy[0], obj_xy[1], table_top_z + self.obj_half_height])
+            above = obj_pos0 + np.array([0, 0, STANDOFF])
+            q_pregrasp, _ = best_oriented_ik(self.model, above, rng, descend_check_pos=obj_pos0)
+            if q_pregrasp is not None:
+                break
+        else:
+            raise RuntimeError("best_oriented_ik found no valid candidate in 10 resampled "
+                                "object positions -- investigate, this should be rare")
+        self.obj_pos0 = obj_pos0
         yaw = object_yaw_for_gripper(self.model, q_pregrasp, self.site_id)
 
         self.data.qpos[:N_ARM] = q_pregrasp
