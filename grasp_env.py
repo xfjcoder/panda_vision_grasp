@@ -69,6 +69,21 @@ PROXIMITY_RADIUS = STANDOFF  # 0.15m -- same scale Stage 2's own pregrasp stando
 # one failed episode doesn't generalize to a successful one's much longer proximity dwell time.
 W_APPROACH_SPEED = 0.5
 
+# Every RL-trained checkpoint so far (grasp01/04/06), not just the fast ones, visibly "shakes"
+# in its rendered rollout -- measured directly: consecutive-step action components flip sign
+# 20-68% of the time (vs. bc01/the scripted controller's ~2%), and the raw (unweighted) sum of
+# ||a_t - a_t-1||^2 over an arm-joint action sequence is 2-3 orders of magnitude higher for
+# these policies (112-1675) than for the scripted trajectory (~0.05) -- a separate failure mode
+# from approach SPEED (W_APPROACH_SPEED above): nothing in the reward penalizes reversing
+# direction step to step, only the raw magnitude and (now) proximity-gated speed, so rapid
+# oscillation is free as long as the average magnitude/proximity cost stays low. Calibrated the
+# same way as W_APPROACH_SPEED -- checked the raw total against both the scripted trajectory
+# (must stay negligible) and grasp01's real rollout (the worst oscillator measured, want it
+# penalized on the same order as TERMINAL_BONUS/the distance term) -- W_SMOOTH=0.01 gives
+# grasp01-level oscillation a ~9-17 penalty depending on severity while costing the scripted
+# trajectory <0.001.
+W_SMOOTH = 0.01
+
 
 class GraspPixelEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -113,6 +128,7 @@ class GraspPixelEnv(gym.Env):
         self.q_target = np.zeros(N_ARM)
         self.gripper_target = GRIPPER_OPEN
         self.obj_pos0 = np.zeros(3)
+        self.prev_arm_action = np.zeros(N_ARM)
         self.t = 0
 
     def set_curriculum_scale(self, scale):
@@ -173,6 +189,7 @@ class GraspPixelEnv(gym.Env):
 
         self.q_target = q_pregrasp.copy()
         self.gripper_target = GRIPPER_OPEN
+        self.prev_arm_action = np.zeros(N_ARM)
         self.t = 0
         return self._get_obs(), {}
 
@@ -193,9 +210,12 @@ class GraspPixelEnv(gym.Env):
 
         proximity = max(0.0, 1.0 - dist / PROXIMITY_RADIUS)
         arm_action_mag = float(np.linalg.norm(action[:N_ARM]))
+        smoothness_cost = float(np.sum((action[:N_ARM] - self.prev_arm_action) ** 2))
+        self.prev_arm_action = action[:N_ARM].copy()
         reward = (-W_DIST * dist + W_HEIGHT * max(0.0, rise)
                   - W_ACTION * float(np.sum(action ** 2))
-                  - W_APPROACH_SPEED * proximity * arm_action_mag)
+                  - W_APPROACH_SPEED * proximity * arm_action_mag
+                  - W_SMOOTH * smoothness_cost)
         terminated = self.t >= EPISODE_STEPS
         success = bool(rise > SUCCESS_RISE_FRAC * LIFT_HEIGHT and drift < SUCCESS_DRIFT_MAX)
         if terminated and success:

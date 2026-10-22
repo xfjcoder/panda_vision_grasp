@@ -379,6 +379,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp05` | PPO fine-tuning (1M steps, `ent_coef=0.01`) on top of `bc01`'s checkpoint | 0/20, **worse** than `bc01` alone (rewards mostly -5 to -25) | Fine-tuning didn't correct BC's small errors -- it overwrote the whole gentle approach. Measured directly: `bc01`'s mean per-step joint delta is 0.0088 rad, matching the scripted controller's own pace (0.0119 rad); after fine-tuning it's 0.116 rad, a 13x jump back into the same near-rate-cap regime `grasp04` shows in the GIF above. Nothing in the reward penalizes approach speed, and `gamma=0.98` discounting rewards reaching low distance *sooner* -- PPO found it more rewarding to rush in and knock the object around than to preserve BC's careful alignment |
    | `grasp06` | Proximity-gated approach-speed penalty added to the reward, PPO fine-tune from `bc01` again | 0/20, action magnitude at closest approach unchanged (0.1147 vs `grasp05`'s 0.1097 rad) | Penalty correctly wired (premise check: scripted trajectory reward barely moves, 20.94 vs ~20.8) but its accumulated magnitude over an episode (-0.33) is ~60x smaller than the distance term's (-20.0) -- numerically negligible, not a logic error |
    | `grasp07` | Same as `grasp06` but `W_APPROACH_SPEED` raised 0.1->0.5 (swept and verified, not a naive 60x guess), PPO fine-tune from `bc01` again | Running | -- |
+   | `grasp08` | Same as `grasp07`, plus a new `W_SMOOTH * ||a_t - a_t-1||^2` action-rate penalty (see below) | Running | -- |
 
    **Every attempt's rollout, not just one representative GIF** -- same `workspace_cam` view
    the policy itself sees, seed 0 for all seven so the object's start position is identical
@@ -393,6 +394,45 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc01` | <img src="media/bc01.gif" width="280"> |
    | `grasp05` | <img src="media/grasp05.gif" width="280"> |
    | `grasp06` | <img src="media/grasp06.gif" width="280"> |
+
+10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
+    watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
+    than moving smoothly, in every RL-trained run, not just the fast ones.** Quantified
+    directly: for each arm-joint action component, how often it flips sign between consecutive
+    steps, and the raw (unweighted) `sum(||a_t - a_t-1||^2)` over an episode.
+
+    | Run | mean\|action\| | mean\|Δaction\| | sign-flip rate | raw smoothness total |
+    |---|---|---|---|---|
+    | `bc01` (imitation) | 0.031 | 0.003 | 2% | 0.018 |
+    | scripted controller | -- | -- | -- | 0.046 (mean over 10 seeds) |
+    | `grasp06` | 0.460 | 0.244 | 20% | 112.5 |
+    | `grasp04` | 0.813 | 0.726 | 40% | 907.9 |
+    | `grasp01` | 0.756 | 1.232 | 68% | 1675.1 |
+
+    `bc01` and the scripted controller move almost perfectly smoothly (direction barely
+    changes step to step); every RL-trained policy reverses direction on a large fraction of
+    steps, and for `grasp01` the step-to-step change in action is actually *larger* than the
+    action itself -- the arm is flipping between near-opposite joint commands almost every
+    control tick (20Hz), which is what reads as "shaking" in the GIF.
+
+    **Root cause**: nothing in the reward penalizes *changing* the action between steps, only
+    its raw magnitude (`W_ACTION=0.001`, deliberately tiny) and (as of `grasp06`) proximity-
+    gated speed -- both allow high-frequency oscillation as long as the average stays low.
+    `ent_coef=0.01` (needed to avoid the earlier exploration-collapse problem) also keeps the
+    action distribution's std near 1.0 throughout training, actively working against smooth
+    output. `go1_rl_walk` already has the equivalent fix in its own reward
+    (`--velocity-smoothness-weight`) -- this project never added it.
+
+    **Fix**: added `W_SMOOTH * sum((action[:N_ARM] - prev_arm_action) ** 2)` to the reward.
+    Calibrated the same way as `W_APPROACH_SPEED` -- checked the raw (unweighted) total against
+    both the scripted trajectory (must stay negligible) and `grasp01`'s real rollout (the worst
+    oscillator measured, want it penalized on the same order as `TERMINAL_BONUS`/the distance
+    term) before picking a weight. `W_SMOOTH=0.01` gives `grasp01`-level oscillation a ~9-17
+    penalty (depending on severity) while costing the scripted trajectory <0.001 -- premise-
+    checked: scripted trajectory still 5/5 successful, mean reward 18.93 (vs. ~18.9-20.8 at
+    earlier stages, barely moved). Launched `grasp08` (PPO fine-tune from `bc01`, both the
+    approach-speed and smoothness fixes together) alongside `grasp07` (approach-speed alone),
+    since there's CPU headroom to run both at once (16 cores, each run uses 8).
 
 ## Repository layout
 
