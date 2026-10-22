@@ -361,6 +361,21 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp04` | Position curriculum (0.15->1.0 scale) on top of `ent_coef=0.01` | 0/20 at full range AND at the narrow scale actually trained on | Not a generalization gap -- the core descend-close-lift skill was never learned even at the easiest difficulty; the grasp-closing maneuver itself is the bottleneck, not task-difficulty breadth |
    | `bc01` | Behavior cloning on Stage 2's scripted controller (200/200 demo episodes, no RL at all) | 0/20, but qualitatively the best result so far: several trials showed small positive `rise` (up to 0.0115m, vs. every RL run's flat zero/negative), rewards mostly -2 to -14 | Classic BC compounding-error: imitates the demonstrator well locally but never saw how to recover from small deviations, so drifts off-distribution before completing the sequence |
    | `grasp05` | PPO fine-tuning (1M steps, `ent_coef=0.01`) on top of `bc01`'s checkpoint | 0/20, **worse** than `bc01` alone (rewards mostly -5 to -25) | Fine-tuning didn't correct BC's small errors -- it overwrote the whole gentle approach. Measured directly: `bc01`'s mean per-step joint delta is 0.0088 rad, matching the scripted controller's own pace (0.0119 rad); after fine-tuning it's 0.116 rad, a 13x jump back into the same near-rate-cap regime `grasp04` shows in the GIF above. Nothing in the reward penalizes approach speed, and `gamma=0.98` discounting rewards reaching low distance *sooner* -- PPO found it more rewarding to rush in and knock the object around than to preserve BC's careful alignment |
+   | `grasp06` | Proximity-gated approach-speed penalty added to the reward, PPO fine-tune from `bc01` again | 0/20, action magnitude at closest approach unchanged (0.1147 vs `grasp05`'s 0.1097 rad) | Penalty correctly wired (premise check: scripted trajectory reward barely moves, 20.94 vs ~20.8) but its accumulated magnitude over an episode (-0.33) is ~60x smaller than the distance term's (-20.0) -- numerically negligible, not a logic error |
+
+   **Every attempt's rollout, not just one representative GIF** -- same `workspace_cam` view
+   the policy itself sees, seed 0 for all seven so the object's start position is identical
+   across runs and only the policy's behavior differs:
+
+   | Run | Rollout |
+   |---|---|
+   | `grasp01` | <img src="media/grasp01.gif" width="280"> |
+   | `grasp02` | <img src="media/grasp02.gif" width="280"> |
+   | `grasp03` | <img src="media/grasp03.gif" width="280"> |
+   | `grasp04` | <img src="media/stage5_rl_failure.gif" width="280"> |
+   | `bc01` | <img src="media/bc01.gif" width="280"> |
+   | `grasp05` | <img src="media/grasp05.gif" width="280"> |
+   | `grasp06` | <img src="media/grasp06.gif" width="280"> |
 
 ## Repository layout
 
@@ -389,7 +404,9 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── stage5_rl_failure.gif
+│   ├── stage5_rl_failure.gif          # grasp04's rollout
+│   ├── bc01.gif, grasp01.gif, grasp02.gif, grasp03.gif,
+│   └── grasp05.gif, grasp06.gif       # every other attempt's rollout, see table above
 ├── requirements.txt
 └── README.md
 ```
