@@ -226,6 +226,31 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    exploration alive longer, rather than further scaling the same recipe that already showed
    it won't self-correct.
 
+6. **`ent_coef=0.01` (`grasp03`, fresh 1M-step run, not resumed -- resuming from `grasp02`
+   would have carried forward its already-collapsed std) -- the diagnosed mechanism was fixed,
+   but that wasn't sufficient to solve the task.** `std` held steady around 1.2-1.3 for the
+   entire run (no collapse), and `approx_kl` stayed in a healthy range (well under 0.1 for most
+   of training, only trivially near-zero at the very end as the linear LR schedule decayed to
+   ~0). So the fix did exactly what it was diagnosed to do. Result: still **0/20**.
+
+   The failure mode changed shape, though, which matters: `rise` across all 20 eval trials sat
+   at essentially 0 (~-0.01m, noise-level settling) instead of grasp01/02's more erratic
+   values. The policy isn't attempting a descend-grasp-lift sequence at all -- it's staying
+   near its start state rather than drifting past the object or flailing. That's consistent
+   with a different, likely deeper problem than exploration collapse: the task is thrown at
+   full difficulty from step 0 (`random_table_xy` samples the entire table range on every
+   single episode, from the very first one), with reward signal that's mostly a sparse +20
+   terminal bonus plus small dense shaping -- there may simply not be enough early reward
+   gradient for PPO to discover a multi-phase motor skill cold, across every object position
+   at once, within this budget.
+
+   **Lesson**: exploration collapse and insufficient task scaffolding are separate problems
+   that can both be present -- fixing one (the collapse) is necessary but was not alone
+   sufficient here. **Next experiment, not yet tried**: a position curriculum -- start
+   `reset()` with a fixed or narrow object-position range, widen `TABLE_XY_RANGE` once reward
+   crosses a threshold, so the policy can lock in a working grasp motion before having to
+   generalize it across the full table.
+
 ## Repository layout
 
 ```

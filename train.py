@@ -46,6 +46,7 @@ def main():
     ap.add_argument("--n-steps", type=int, default=256)
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--gamma", type=float, default=0.98)
+    ap.add_argument("--ent-coef", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", type=str, default=None)
     ap.add_argument("--resume-vecnormalize", type=str, default=None)
@@ -83,7 +84,7 @@ def main():
             n_steps=n_steps,
             batch_size=batch_size,
             gamma=args.gamma,
-            ent_coef=0.0,
+            ent_coef=args.ent_coef,
             device="cpu",
             tensorboard_log=str(run_dir / "logs"),
             seed=args.seed,
