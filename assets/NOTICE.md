@@ -13,5 +13,13 @@ variant already uses for its own gripper site -- this file (the non-MJX variant)
 have one. Used as the grasp-point/end-effector site for IK and camera-relative reasoning in this
 project; no other change to the file.
 
+**A second small modification to `panda.xml`**: added a `<camera name="wrist_cam" pos="0 0 0.02"
+quat="0 1 0 0" fovy="70"/>` inside the same `hand` body, just behind the `gripper` site, oriented
+180 degrees about the local x-axis so its view direction (the camera's own -z) points along the
+hand's +z toward the fingers/grasp point rather than back up the arm. Purely for visualization
+(an eye-in-hand "robot's own view" alongside the external `workspace_cam` in demo GIFs) -- the
+policy's actual observation in `grasp_env.py` still renders from `workspace_cam` only, this
+camera is never read by training/eval code.
+
 Everything else in this repo (scenes/tasks built on top of this model, training code, docs) is
 original to this project.

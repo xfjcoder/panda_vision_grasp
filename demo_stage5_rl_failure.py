@@ -3,11 +3,13 @@ README's Stage 5 failure writeups (grasp01-grasp04, all 0/20) -- visual evidence
 policy reaches toward the object but never completes a clean grasp+lift" actually looks like,
 not just the eval numbers.
 
-Uses a separate high-res renderer for the recorded frames; the policy itself still only ever
-sees the normal 64x64 GraspPixelEnv observation, exactly as during training/eval.
+Uses separate high-res renderer(s) for the recorded frames; the policy itself still only ever
+sees the normal 64x64 GraspPixelEnv observation from workspace_cam, exactly as during
+training/eval -- wrist_cam (--dual-view) is purely a visualization add-on, see NOTICE.md.
 
 Usage:
     python3 demo_stage5_rl_failure.py --run-name grasp04 --seed 0 --record media/stage5_rl_failure.gif
+    python3 demo_stage5_rl_failure.py --run-name grasp08 --seed 0 --dual-view --record media/grasp08_dual.gif
 """
 import argparse
 from pathlib import Path
@@ -26,6 +28,9 @@ def main():
     ap.add_argument("--run-name", type=str, required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--record", type=str, default=None)
+    ap.add_argument("--dual-view", action="store_true",
+                     help="Also render wrist_cam (eye-in-hand) side by side with workspace_cam. "
+                          "Visualization only -- the policy never sees this view.")
     args = ap.parse_args()
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
@@ -36,12 +41,18 @@ def main():
     norm_env.training = False
     norm_env.norm_reward = False
 
-    record_renderer = mj.Renderer(env.model, height=480, width=640)
+    workspace_renderer = mj.Renderer(env.model, height=480, width=640)
+    wrist_renderer = mj.Renderer(env.model, height=480, width=480) if args.dual_view else None
     frames = []
 
     def render():
-        record_renderer.update_scene(env.data, camera="workspace_cam")
-        frames.append(record_renderer.render().copy())
+        workspace_renderer.update_scene(env.data, camera="workspace_cam")
+        frame = workspace_renderer.render().copy()
+        if wrist_renderer is not None:
+            wrist_renderer.update_scene(env.data, camera="wrist_cam")
+            wrist_frame = wrist_renderer.render().copy()
+            frame = np.concatenate([frame, wrist_frame], axis=1)
+        frames.append(frame)
 
     obs, _ = env.reset(seed=args.seed)
     render()
@@ -63,7 +74,9 @@ def main():
         imgs[0].save(args.record, save_all=True, append_images=imgs[1:], duration=50, loop=0)
         print(f"Saved {len(frames)} frames to {args.record}")
 
-    record_renderer.close()
+    workspace_renderer.close()
+    if wrist_renderer is not None:
+        wrist_renderer.close()
     env.close()
 
 
