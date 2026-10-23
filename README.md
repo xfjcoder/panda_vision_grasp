@@ -383,6 +383,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp07` | Same as `grasp06` but `W_APPROACH_SPEED` raised 0.1->0.5 (swept and verified, not a naive 60x guess), PPO fine-tune from `bc01` again | 0/20, `drift`~0.0000m (vs `grasp04`/`05`/`06`'s 0.03-0.3m) | New failure mode: the penalty didn't teach a careful approach, it taught retreat. `dist` briefly tightens to 0.10m by step 10-20, then the arm backs off to 0.69m by episode end while action magnitude stays high (mean 1.37) -- cheaper to leave `PROXIMITY_RADIUS` than pay the approach-speed cost, since this policy was never on a path to the terminal bonus anyway |
    | `grasp08` | Same as `grasp07`, plus a new `W_SMOOTH * ||a_t - a_t-1||^2` action-rate penalty (see below) | 0/20, same retreat pattern as `grasp07` (`dist` never drops below its 0.157m start, climbs to 0.27-0.34m); oscillation somewhat reduced (raw smoothness total 168 vs `grasp01`'s 1675) but swamped by the same avoidance behavior | Confirms the failure is the proximity-gated penalty's design, not oscillation -- adding the smoothness fix on top didn't change the core problem |
    | `bc02` | One DAgger round on `bc01`: relabeled 200 `bc01`-driven rollouts with fresh expert corrections, merged with the original 24k demos (48k total), retrained from scratch | 0/20, mean reward WORSE than `bc01` (-18.2 vs -8.8), but best trial's `rise` 2.4x higher (0.0282m vs 0.0115m) with visually confirmed correct centering at the close phase | Fixed the targeted compounding-drift/alignment problem (confirmed via wrist-cam frames) but the correction labels are inherently noisier/larger than the original smooth demos, teaching a noisier overall policy (sign-flip rate 0.56 vs `bc01`'s 0.02) -- net regression on average despite fixing the specific failure mode |
+   | `bc03` | Wrist camera (`wrist_cam`) promoted to a real policy input alongside `workspace_cam`; fresh demo collection + plain BC, no DAgger | 0/20, but best trial `rise=0.0885m` (3x `bc02`'s best), object genuinely grasped and held through the whole lift -- failed only on `drift=0.2444m` (lift-phase lateral precision, not alignment) | Closest result to success in the whole project: the alignment/grasping problem blocking every prior attempt is essentially solved for this case; the remaining gap narrowed to lift-phase lateral drift |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
    `workspace_cam` (left, the view the policy itself sees) and `wrist_cam` (right, an
@@ -403,6 +404,8 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp08` | <img src="media/grasp08.gif" width="280"> |
    | `bc02` (seed 0) | <img src="media/bc02.gif" width="280"> |
    | `bc02` (seed 18, best case -- object correctly centered at close phase) | <img src="media/bc02_best_case.gif" width="280"> |
+   | `bc03` (seed 0) | <img src="media/bc03.gif" width="280"> |
+   | `bc03` (seed 9, best case -- grasped and held through the whole lift) | <img src="media/bc03_best_case.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -529,7 +532,43 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     confirms this needs either a second DAgger round that also controls for action smoothness
     (e.g. oversampling the original clean demos relative to corrections, or correction actions
     computed with a smaller effective gain so they're less jarring), or a fix aimed specifically
-    at the gripper-closing margin/stability. Not yet implemented or discussed with the user.**
+    at the gripper-closing margin/stability.
+
+14. **Wrist camera promoted from visualization-only to a real policy input (`bc03`) -- DONE,
+    commit `4aa9950`, the closest any attempt has come to success yet.** User's own diagnosis,
+    confirmed numerically (`bc02`'s gripper-close alignment offset measured at 0.03-0.12m across
+    several seeds, far exceeding the object's 2cm half-width): judging a few-cm position error
+    from a single small, distant blob in the 64x64 external `workspace_cam` frame is a much
+    harder estimation problem than from a close eye-in-hand view during the precision-critical
+    final approach. `wrist_cam` (added earlier purely for GIF visualization) is now a second
+    `"wrist_image"` key in `grasp_env.py`'s observation Dict -- SB3's `MultiInputPolicy` builds
+    a second CNN branch for it with no custom architecture code. This breaks compatibility with
+    every earlier Stage 5 checkpoint (`bc01`/`bc02`/`grasp01`-`08` only ever saw `workspace_cam`);
+    their results stay documented as-is above.
+
+    Re-collected demos with both cameras (200/200 scripted successes, unchanged reward/physics,
+    only the observation grew) and trained `bc03` via plain BC (no DAgger yet -- isolating
+    whether the camera alone helps before stacking more changes). Loss dropped to 0.00008, ~22x
+    lower than `bc01`'s 0.00177, consistent with the network having much more precise
+    information to fit the demonstrated actions.
+
+    **Result: still 0/20, but trial 9 (seed 9) reached `rise=0.0885m` -- right at the 0.09m
+    success threshold, 3x higher than any previous attempt's best (`bc02`'s 0.0282m) -- and the
+    GIF confirms why: the object is genuinely GRASPED and held firmly between the pads through
+    the entire lift phase (`media/bc03_best_case.gif`), not just nudged or missed.** It failed
+    on `drift=0.2444m` (far over the 0.04m limit), not on the grasp itself -- the arm carries the
+    object sideways during the lift rather than straight up. This is a qualitatively different
+    failure from every prior attempt: the alignment/grasping problem that blocked `bc01`-`bc02`
+    and every RL run is essentially solved for at least this case; what's left is lift-phase
+    lateral precision, a narrower, more tractable problem. Averaged over 20 trials, `bc03`'s mean
+    reward (-9.92) is similar to `bc01`'s (-8.83) and only 2/20 trials show positive `rise` (same
+    count as `bc02`), so this isn't yet a broad improvement -- but the ceiling of what's
+    achievable clearly moved.
+
+    **Not yet discussed with the user**: natural next step is a DAgger round on top of `bc03`
+    (same recipe as `bc01`->`bc02`, now updated for the dual-camera observation), likely to
+    matter more now that the dominant alignment blocker is mostly resolved -- or a fix aimed
+    specifically at lift-phase lateral drift.
 
 ## Repository layout
 
@@ -559,7 +598,7 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01.gif, bc02.gif, bc02_best_case.gif, grasp01.gif - grasp08.gif   # every attempt's rollout, dual-view, see table above
+│   └── bc01-bc03.gif, bc02/bc03_best_case.gif, grasp01-08.gif   # every attempt's rollout, see table above
 ├── requirements.txt
 └── README.md
 ```
