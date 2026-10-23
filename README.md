@@ -388,6 +388,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc05_chunked` | Action chunking instead of per-step DAgger: standalone CNN+MLP regressor predicts a block of 10 future actions from one observation (`train_bc_chunked.py`), executed open-loop, re-planning every 10 steps instead of every step -- same clean 24k `bc03` demos, no DAgger | 0/20, WORSE on average than both `bc03` and `bc04` (mean reward -19.32 vs -9.65/-8.55) despite comparable mean `drift` (0.036, in between `bc03`/`bc04`'s) -- the worse mean comes from a heavy bad tail (12/20 trials below -20 reward, vs 0/20 for `bc03`/`bc04`) | New, chunking-specific failure mode: when a 10-step chunk's assumption breaks mid-execution (grasp not fully secure, object slips), the policy can't react until the chunk ends -- confirmed by trace (seed 0): object flung from the grip around step 80, policy keeps executing the committed lift+hold chunk as if still holding it, then the following re-observation is wildly out-of-distribution and cascades into the arm flying to `grip_xy` near the robot base by episode end (`dist` growing to 0.36m). On the best trial (seed 8) chunking showed something per-step BC never did: `drift` SHRINKING smoothly from 0.057m back to 0.007m over the back half of the episode, a genuinely self-correcting trajectory -- but `rise` still capped at 0.0396m, similar to `bc04`, not better |
    | `bc05_chunked --adaptive` / `bc06_chunked` | Proprio-keyed re-planning (commit only 1 step once the gripper reads closed) tested on `bc05_chunked`'s existing checkpoint, then on `bc06_chunked`, a retrain with randomized (not fixed-stride) chunk starts meant to make the model queryable off-grid | Both much worse, not better: `bc05_chunked --adaptive` mean reward -49.6 (vs its own fixed-cadence -19.3); `bc06_chunked` collapsed even at ITS OWN fixed cadence (mean reward -54.2, `rise` stuck at reset value and `drift=0.0000` in all 20 trials -- never meaningfully touches the object) | `bc05_chunked --adaptive` confirmed the model was only ever trained to be queried at fixed multiples of 10 -- forcing an off-grid query is a context it never saw, not just a harder one. The random-start retrain meant to fix that (`bc06_chunked`) itself failed to learn a usable policy at all (likely: the same ~2,400 training chunks spread over ~111 possible start positions per episode is too sparse to fit, vs. 12 well-sampled fixed positions) -- the proprio-keyed re-planning idea remains untested, not refuted; testing it properly needs either more demo data or a smarter (not uniform) random-start sampling scheme |
    | `bc06` (note: unrelated to `bc06_chunked` above) | DAgger round 3 -- NOTE run-name collision in naming only, not data: `bc06` is the 2nd per-step DAgger iteration (on `bc04`'s own rollouts, same `CORRECTION_CAP=0.15`), merged CUMULATIVELY with all prior rounds (`demos_dagger3.npz` 48k + `dagger04.npz` 24k = 72k total, proper DAgger convention of keeping every round, not just the latest) | 0/20, but the best result in the whole project: mean reward -7.99 (best yet), mean `rise` 0.0253 (11x `bc04`'s), 7/20 trials with positive `rise`, 3/20 trials EXCEEDING the 0.09m rise threshold outright, 14/20 under the 0.04m drift threshold. Best trial (seed 12) crosses the rise threshold comfortably by step 85 and reaches `rise=0.1158m` by episode end, failing ONLY on `drift=0.0515m` -- just 1.3x over the limit | Confirmed via trace: the SAME systematic one-directional drift bias as every prior round, continuing to shrink with each DAgger iteration (this round's worst-case drift is well below `bc04`'s). Action-noise diagnostic confirms the capped-correction discipline held through a 2nd cumulative round too (mean\|action\| 0.041, in line with `bc04`'s 0.038, nowhere near `bc02`'s uncapped 0.226). This is the first run where a single trial is close enough that one more DAgger round looks genuinely likely to cross the finish line |
+   | `bc07` | DAgger round 4 (3rd per-step iteration, on `bc06`'s own rollouts, same `CORRECTION_CAP=0.15`), merged cumulatively with every prior round (`demos_dagger4.npz` 72k + `dagger05.npz` 24k = 96k total) -- launched directly off the user's visual observation that `bc06`'s gallery GIFs show the gripper closing near the TOP tip of the cube rather than centered, prompting a quantitative check (see below) before this round even finished training | 0/20, mixed vs `bc06`: mean reward WORSE (-9.02 vs -7.99) and the best-rise trials now carry MORE drift (up to 0.098m vs `bc06`'s best 0.052m), but 10/20 trials now get positive `rise` (vs 7/20) and the action-noise diagnostic, while still far from `bc02`'s blown-up regime, ticked up again (mean\|action\| 0.052, vs `bc04`'s 0.038 and `bc06`'s 0.041 -- a 3-round upward trend worth watching) | **The real finding is a newly-quantified vertical grasp-height bug, not this round's net result.** Measured the vertical offset between the gripper site and the object's center at the moment the gripper finishes closing (stabilized, 15 steps after first closing below 75%): the scripted expert grasps almost perfectly centered (mean offset 0.0003m across 20 episodes) but `bc04` and `bc06` both grasp ~0.049m high -- most of the way from the cube's center (half-height 0.03m) past its top edge -- confirmed visually (`media/grasp_height_comparison.png`, expert vs `bc06` wrist-cam at the close moment). This bias is INVARIANT across two full cumulative DAgger rounds (`bc04`: 0.0488m, `bc06`: 0.0489m, same to 3 decimal places) -- it long predates `bc06` and was being completely masked by the drift-focused analysis, since many of its worst cases (offset >0.05m) simply never lift the object at all (`rise` stuck at the reset baseline), trivially producing near-zero `drift` and hiding the real cause as "no grasp" rather than "bad grasp." `bc07` is the first round to visibly move this number (0.033m, down ~1/3), which is why more trials now attempt a lift at all -- but the same correction signal that's fixing vertical placement is simultaneously getting noisier overall (the mean\|action\| creep above), which is the most likely explanation for the worse drift on this round's successful lifts. Since the expert itself is dead-center, this is purely a policy-learned bias, not a flawed label -- plausibly a depth/scale misjudgment from the camera views rather than a label-noise problem, which per-step DAgger's correction signal only partially addresses |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
    `workspace_cam` (left) and `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md).
@@ -421,6 +422,8 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc06` (seed 0, note: unrelated to `bc06_chunked` above -- naming collision, not data) | <img src="media/bc06.gif" width="280"> |
    | `bc06` (seed 12, best case -- rise crosses the success threshold, fails only on drift) | <img src="media/bc06_best_case.gif" width="280"> |
    | `bc06` (seed 13, the other near-miss -- drift stays under threshold, rise falls just short) | <img src="media/bc06_near_miss_drift_ok.gif" width="280"> |
+   | Grasp-height comparison: scripted expert (left, dead-center, offset 0.0003m) vs `bc06` (right, grasping near the top tip, offset 0.049m) -- the root cause behind item 19 below | <img src="media/grasp_height_comparison.png" width="560"> |
+   | `bc07` (seed 18, highest-rise trial this round) | <img src="media/bc07.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -778,6 +781,59 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     actual success. Chunking could still be revisited later with a better-resourced random-
     start retrain, but per-step DAgger is clearly the stronger lever right now.
 
+19. **DAgger round 4 on `bc06` (`bc07`) -- and a real root-cause finding the user spotted from
+    the GIFs, not from a metric.** The user watched `bc06`'s gallery rollouts and flagged that
+    the gripper visibly closes near the TOP tip of the cube, not centered on it, even in some
+    cases that look like successes. That observation was checked quantitatively before taking
+    it on faith: at the moment each rollout's gripper finishes closing (15 steps after crossing
+    75% toward closed, long enough for the joint to settle), the vertical offset between the
+    gripper site and the object's center was measured directly from `env.data.site_xpos`/
+    `env.data.xpos`, across all 20 eval seeds, for the scripted expert and for `bc04`/`bc06`.
+
+    **Confirmed, not just visually plausible: the expert grasps almost perfectly centered (mean
+    offset 0.0003m over 20 episodes) while `bc04` and `bc06` both grasp ~0.049m high** -- most of
+    the way from the cube's center (half-height 0.03m) past its top edge, identical to 3 decimal
+    places across two full cumulative DAgger rounds (`bc04`: 0.0488m, `bc06`: 0.0489m). Visual
+    confirmation in `media/grasp_height_comparison.png`: the same wrist-cam close-moment view,
+    expert dead-center vs `bc06` pads riding the top tip. Since the expert itself is centered,
+    this is a purely policy-learned bias, not a labeling defect -- most plausibly a depth/scale
+    misjudgment from the camera views (vertical depth is the hardest quantity for a
+    fixed-viewpoint camera to recover precisely, unlike lateral position which projects more
+    directly onto the image plane).
+
+    **Why this had never shown up before**: the project's whole narrative to this point was
+    built around lateral `drift`, but `drift` is only measured meaningfully once the object is
+    actually lifted. The worst vertical-offset cases (offset > ~0.05m) simply never get a secure
+    grip at all -- `rise` sticks at the reset baseline and `drift` reads near-zero because the
+    object never moves, which looked identical to "no problem here" in every prior trace. In
+    `bc06`'s own 20-trial eval, exactly the trials with offset > 0.05m are the ones stuck at
+    `rise=-0.0003` (10/20 trials); every trial with offset < 0.02m achieved a real lift
+    (`rise` 0.07-0.16m). This is very likely as large a blocker as lateral drift has been, and it
+    was invisible to the metrics-only analysis that drove every round from `bc02` through `bc06`.
+
+    **`bc07`'s own result, same recipe as `bc04`->`bc06` (`CORRECTION_CAP=0.15`, rollout `bc06`'s
+    own policy, relabel, merge cumulatively -- `demos_dagger4.npz` 72k + `dagger05.npz` 24k =
+    96k)**: mixed, not a clean win. Mean reward is WORSE than `bc06` (-9.02 vs -7.99) and the
+    best-rise trials now carry more drift (up to 0.098m vs `bc06`'s best 0.052m) -- still 0/20.
+    But the vertical offset this round moved for the first time in two rounds: 0.033m, down
+    about a third from the 0.049m that had been frozen since `bc04`. More trials now get enough
+    purchase to attempt a lift at all (10/20 positive `rise` vs 7/20). The likely explanation for
+    the net-worse result despite the real vertical-offset improvement: the action-noise
+    diagnostic (mean\|action\|) rose again this round, 0.052 vs `bc06`'s 0.041 -- still nowhere
+    near `bc02`'s uncapped 0.226 blowup, but a 3-round upward trend (0.038 -> 0.041 -> 0.052)
+    worth watching. Fixing the vertical bias and controlling correction noise appear to be in
+    some tension at the current data scale and correction cap.
+
+    **Not yet discussed with the user**: this reframes what the "last mile" problem actually is.
+    Lateral drift was real and DAgger has reliably shrunk it, but the vertical grasp-height bias
+    is at least as large a blocker and was completely unaddressed until this round -- and even
+    this round only partially fixed it while trading off noise elsewhere. A targeted fix aimed
+    specifically at depth/vertical precision (e.g., a loss term or auxiliary signal that
+    penalizes z-error at the close phase more heavily than DAgger's blanket per-step correction
+    does, or examining whether the wrist camera's own FOV/standoff gives enough depth parallax to
+    resolve this precisely) looks more promising now than another undifferentiated cumulative
+    DAgger round.
+
 ## Repository layout
 
 ```
@@ -809,7 +865,8 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01-bc06.gif, bc02-06_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif
+│   └── bc01-bc07.gif, bc02-06_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
+│       grasp_height_comparison.png
 ├── requirements.txt
 └── README.md
 ```
