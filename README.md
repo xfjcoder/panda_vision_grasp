@@ -385,6 +385,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc02` | One DAgger round on `bc01`: relabeled 200 `bc01`-driven rollouts with fresh expert corrections, merged with the original 24k demos (48k total), retrained from scratch | 0/20, mean reward WORSE than `bc01` (-18.2 vs -8.8), but best trial's `rise` 2.4x higher (0.0282m vs 0.0115m) with visually confirmed correct centering at the close phase | Fixed the targeted compounding-drift/alignment problem (confirmed via wrist-cam frames) but the correction labels are inherently noisier/larger than the original smooth demos, teaching a noisier overall policy (sign-flip rate 0.56 vs `bc01`'s 0.02) -- net regression on average despite fixing the specific failure mode |
    | `bc03` | Wrist camera (`wrist_cam`) promoted to a real policy input alongside `workspace_cam`; fresh demo collection + plain BC, no DAgger | 0/20, but best trial `rise=0.0885m` (3x `bc02`'s best), object genuinely grasped and held through the whole lift -- failed only on `drift=0.2444m` (lift-phase lateral precision, not alignment) | Closest result to success in the whole project: the alignment/grasping problem blocking every prior attempt is essentially solved for this case; the remaining gap narrowed to lift-phase lateral drift |
    | `bc04` | DAgger round 2 (on `bc03` this time, dual-camera), with `CORRECTION_CAP=0.15` added to avoid `bc02`'s label-noise regression -- merged with the original 24k `bc03` demos (48k total), retrained from scratch | 0/20, but a BROAD improvement over `bc03`, not one lucky trial: mean reward -8.55 vs -9.65, mean `rise` 0.0023 vs 0.00095, 5/20 trials with positive `rise` vs 2/20, max `drift` 0.149m vs 0.395m | Confirmed via per-step trace that the lift-phase drift is the same systematic, one-directional per-step bias as before (present from the moment the gripper closes, not a lift-kinematics artifact), just ~3-4x smaller in magnitude after one DAgger round -- matches DAgger's known iterative-convergence behavior, not a one-shot fix. `CORRECTION_CAP` worked: action-noise diagnostic stayed close to smooth-demo scale (mean\|action\| 0.038, vs `bc01`'s 0.031 and `bc02`'s blown-up 0.226), avoiding `bc02`'s regression. New finding exposed now that drift is smaller: on the best trial (seed 18) the grasp itself is rock-solid (object-gripper offset ~2mm, constant, through the whole lift) but `rise` plateaus at 0.068m and never reaches the 0.09m threshold -- a second, previously-masked shortfall (insufficient lift height, not just drift) |
+   | `bc05_chunked` | Action chunking instead of per-step DAgger: standalone CNN+MLP regressor predicts a block of 10 future actions from one observation (`train_bc_chunked.py`), executed open-loop, re-planning every 10 steps instead of every step -- same clean 24k `bc03` demos, no DAgger | 0/20, WORSE on average than both `bc03` and `bc04` (mean reward -19.32 vs -9.65/-8.55) despite comparable mean `drift` (0.036, in between `bc03`/`bc04`'s) -- the worse mean comes from a heavy bad tail (12/20 trials below -20 reward, vs 0/20 for `bc03`/`bc04`) | New, chunking-specific failure mode: when a 10-step chunk's assumption breaks mid-execution (grasp not fully secure, object slips), the policy can't react until the chunk ends -- confirmed by trace (seed 0): object flung from the grip around step 80, policy keeps executing the committed lift+hold chunk as if still holding it, then the following re-observation is wildly out-of-distribution and cascades into the arm flying to `grip_xy` near the robot base by episode end (`dist` growing to 0.36m). On the best trial (seed 8) chunking showed something per-step BC never did: `drift` SHRINKING smoothly from 0.057m back to 0.007m over the back half of the episode, a genuinely self-correcting trajectory -- but `rise` still capped at 0.0396m, similar to `bc04`, not better |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
    `workspace_cam` (left) and `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md).
@@ -411,6 +412,8 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc03` (seed 9, best case -- grasped and held through the whole lift) | <img src="media/bc03_best_case.gif" width="280"> |
    | `bc04` (seed 0) | <img src="media/bc04.gif" width="280"> |
    | `bc04` (seed 18, best case -- firm grasp, lift plateaus just short of threshold) | <img src="media/bc04_best_case.gif" width="280"> |
+   | `bc05_chunked` (seed 0, worst case -- chunk commitment failure, object flung around step 80) | <img src="media/bc05_chunked.gif" width="280"> |
+   | `bc05_chunked` (seed 8, best case -- drift self-corrects over the back half of the episode) | <img src="media/bc05_chunked_best_case.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -626,6 +629,60 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     or (b) look specifically at why the learned lift trajectory undershoots the full
     `LIFT_HEIGHT` even when nothing else is going wrong.
 
+16. **Action chunking as an alternative to per-step DAgger (`bc05_chunked`), user: "try action
+    chunking instead of per-step DAgger" -- DONE, net WORSE than per-step BC/DAgger, with a
+    new catastrophic failure mode, but one genuinely informative upside.** Every per-step
+    BC/DAgger attempt so far (`bc01`-`bc04`) shares a structural property: the network makes an
+    independent prediction at every one of the 120 control steps, so a small per-step bias has
+    120 separate chances to nudge the trajectory before it compounds. Action chunking (ACT-
+    style) instead predicts a whole block of `CHUNK_SIZE=10` future actions from a single
+    observation and executes them open-loop, re-planning only every 10 steps (12 re-plans per
+    episode instead of 120) -- fewer independent decision points, and each chunk is one
+    coherent regression target rather than 10 independently-fit single steps.
+
+    Built as a standalone CNN+MLP regressor (`train_bc_chunked.py`'s `ChunkedBCNet`) rather
+    than on SB3's `MultiInputPolicy` -- a multi-step action-chunk head doesn't fit
+    `ActorCriticPolicy`'s single-action-distribution design, so this path is NOT compatible
+    with `train.py`'s RL fine-tuning or `eval_policy.py`; it has its own eval/demo scripts
+    (`eval_policy_chunked.py`, `demo_chunked.py`). Trained on the same clean 24k `bc03` demos
+    bc03 used (no DAgger at all, isolating chunking's own effect) -- smoke-tested the full
+    pipeline (chunk-building, training, eval, GIF rendering) on a 10-episode slice before the
+    full 40-epoch run. Loss converged to 0.00044.
+
+    **Result: still 0/20, and WORSE on average than either per-step variant** -- mean reward
+    -19.32, vs `bc03`'s -9.65 and `bc04`'s -8.55 -- despite mean `drift` (0.036) actually
+    sitting between `bc03`'s (0.051) and `bc04`'s (0.035), not obviously worse. The gap is a
+    heavy bad tail: 12/20 trials scored below -20 reward, vs 0/20 for both per-step runs.
+    Traced the worst case (seed 0) to find out why: the object is held correctly through the
+    close phase and the early lift, then around control step 80 it's abruptly flung out of the
+    grip mid-chunk (`obj_xy` jumps from a stable (0.519,-0.125) to (0.483,-0.113) and keeps
+    moving away over the next two chunks) -- but the policy has already committed to that
+    chunk's lift+hold trajectory and keeps executing it as if the object were still gripped,
+    with no way to react until the chunk ends. By the time it re-observes, the state (gripper
+    far from the object, object on the table where it was never trained to recover from) is
+    wildly out-of-distribution, and the next chunk's prediction cascades further away rather
+    than recovering -- `dist` grows to 0.36m by episode end, with the gripper near the robot
+    base. This is a new failure mode, not present in any per-step BC/DAgger run: open-loop
+    commitment makes a mid-chunk failure WORSE, not better, because nothing can intervene
+    before the damage compounds for the rest of the chunk.
+
+    **The one genuinely informative upside**: on the best trial (seed 8, `rise=0.0396m`,
+    comparable to `bc04`'s best), the trace shows something no per-step BC/DAgger run ever
+    produced -- `drift` SHRINKING smoothly and monotonically from 0.057m down to 0.007m over
+    the back half of the episode, a genuinely self-correcting trajectory, rather than the
+    ever-growing one-directional bias seen in every `bc01`-`bc04` trace. This matches the
+    chunking hypothesis's upside (each chunk is one coherent, smoother regression target) --
+    it just didn't show up reliably enough across seeds to beat per-step DAgger's more modest
+    but more consistent gains.
+
+    **Not yet discussed with the user**: chunking's failure mode here looks tied to the chunk
+    boundary landing badly relative to the close/lift transition (a bad chunk starting right
+    as the grasp finishes, before the model has any evidence the grasp succeeded) -- a smaller
+    `CHUNK_SIZE`, or chunk boundaries aligned to the gripper's own open/closed state (available
+    in proprio) rather than a fixed stride, might keep the "smoother target" upside without the
+    open-loop commitment risk. Alternatively, go back to iterating per-step DAgger (`bc04`'s own
+    next round), which has a smaller but more reliable track record so far.
+
 ## Repository layout
 
 ```
@@ -646,6 +703,9 @@ panda_vision_grasp/
 ├── collect_demos.py                  # Stage 5: BC dataset from the scripted controller
 ├── collect_dagger.py                 # Stage 5: DAgger correction pass on a trained BC policy
 ├── train_bc.py                       # Stage 5: behavior-cloning pretrain on PPO's own network
+├── train_bc_chunked.py               # Stage 5: standalone action-chunking BC (not SB3-based)
+├── eval_policy_chunked.py            # Stage 5: 20-trial eval for a chunked-BC checkpoint
+├── demo_chunked.py                   # Stage 5: renders a chunked-BC policy's rollout
 ├── runs/                             # training checkpoints/logs (gitignored, not committed)
 ├── data/                             # BC demo datasets (gitignored, not committed)
 ├── demo_stage1_kinematic_sweep.py    # Stage 1: verification sweep, see media/ GIF above
@@ -654,7 +714,7 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01-bc04.gif, bc02/bc03/bc04_best_case.gif, grasp01-08.gif   # every attempt's rollout, see table above
+│   └── bc01-bc05_chunked.gif, bc02-05_best_case.gif, grasp01-08.gif   # every attempt's rollout, see table above
 ├── requirements.txt
 └── README.md
 ```
