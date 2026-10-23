@@ -12,7 +12,7 @@ import mujoco as mj
 import numpy as np
 from PIL import Image
 
-from eval_policy_chunked import load_model, predict_chunk
+from eval_policy_chunked import GRIP_CLOSED_THRESH, load_model, predict_chunk
 from grasp_env import EPISODE_STEPS, GraspPixelEnv
 
 
@@ -22,6 +22,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--record", type=str, default=None)
     ap.add_argument("--dual-view", action="store_true")
+    ap.add_argument("--adaptive", action="store_true")
     args = ap.parse_args()
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
@@ -47,7 +48,10 @@ def main():
     t = 0
     while t < EPISODE_STEPS:
         chunk = predict_chunk(model, proprio_mean, proprio_std, obs)
-        for a in chunk:
+        commit_len = chunk_size
+        if args.adaptive and obs["proprio"][-1] < GRIP_CLOSED_THRESH:
+            commit_len = 1
+        for a in chunk[:commit_len]:
             obs, reward, terminated, truncated, info = env.step(a)
             render()
             t += 1

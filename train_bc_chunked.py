@@ -83,11 +83,28 @@ class ChunkedBCNet(nn.Module):
         return out.view(-1, self.chunk_size, ACTION_DIM)
 
 
-def build_chunks(images, wrist_images, proprio, actions, chunk_size):
+def build_chunks(images, wrist_images, proprio, actions, chunk_size, random_starts=False,
+                  rng=None):
+    """random_starts=False (bc05_chunked): chunk starts only at fixed multiples of chunk_size --
+    cheap and matches the fixed re-planning cadence used at eval time, but means the model is
+    NEVER queried at an off-grid timestep during training. Confirmed this is exactly why
+    proprio-keyed adaptive re-planning (eval_policy_chunked.py --adaptive) catastrophically broke
+    bc05_chunked: forcing a query mid-chunk, once the gripper reads closed, asks the model to
+    predict from a context it has literally never seen, not just a hard one.
+
+    random_starts=True: sample chunk starts uniformly over every valid position in the episode
+    (not just the fixed grid), same total chunk COUNT per episode so the dataset size is
+    unchanged -- so the model is queryable from any timestep, a prerequisite for --adaptive to
+    mean anything."""
     n_eps = len(actions) // EPISODE_STEPS
     n_chunks_per_ep = EPISODE_STEPS // chunk_size
-    starts = np.array([ep * EPISODE_STEPS + c * chunk_size
-                        for ep in range(n_eps) for c in range(n_chunks_per_ep)])
+    if random_starts:
+        rng = rng or np.random.default_rng(0)
+        starts = np.array([ep * EPISODE_STEPS + rng.integers(0, EPISODE_STEPS - chunk_size + 1)
+                            for ep in range(n_eps) for _ in range(n_chunks_per_ep)])
+    else:
+        starts = np.array([ep * EPISODE_STEPS + c * chunk_size
+                            for ep in range(n_eps) for c in range(n_chunks_per_ep)])
     action_chunks = np.stack([actions[s:s + chunk_size] for s in starts])
     return images[starts], wrist_images[starts], proprio[starts], action_chunks
 
@@ -97,6 +114,9 @@ def main():
     ap.add_argument("--run-name", type=str, required=True)
     ap.add_argument("--demos", type=str, default="data/demos_dualcam.npz")
     ap.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
+    ap.add_argument("--random-starts", action="store_true",
+                     help="Sample chunk starts at any timestep, not just a fixed stride -- "
+                          "needed so the model can be queried off-grid (see --adaptive eval).")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -110,10 +130,11 @@ def main():
     images, wrist_images = data["images"], data["wrist_images"]
     proprio, actions = data["proprio"], data["actions"]
     images, wrist_images, proprio, action_chunks = build_chunks(
-        images, wrist_images, proprio, actions, args.chunk_size)
+        images, wrist_images, proprio, actions, args.chunk_size,
+        random_starts=args.random_starts, rng=np.random.default_rng(args.seed))
     n = len(action_chunks)
     print(f"loaded {len(actions)} demo transitions from {args.demos}, "
-          f"built {n} chunks of size {args.chunk_size}")
+          f"built {n} chunks of size {args.chunk_size} (random_starts={args.random_starts})")
 
     proprio_mean = proprio.mean(axis=0)
     proprio_std = proprio.std(axis=0) + 1e-6

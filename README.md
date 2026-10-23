@@ -386,6 +386,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc03` | Wrist camera (`wrist_cam`) promoted to a real policy input alongside `workspace_cam`; fresh demo collection + plain BC, no DAgger | 0/20, but best trial `rise=0.0885m` (3x `bc02`'s best), object genuinely grasped and held through the whole lift -- failed only on `drift=0.2444m` (lift-phase lateral precision, not alignment) | Closest result to success in the whole project: the alignment/grasping problem blocking every prior attempt is essentially solved for this case; the remaining gap narrowed to lift-phase lateral drift |
    | `bc04` | DAgger round 2 (on `bc03` this time, dual-camera), with `CORRECTION_CAP=0.15` added to avoid `bc02`'s label-noise regression -- merged with the original 24k `bc03` demos (48k total), retrained from scratch | 0/20, but a BROAD improvement over `bc03`, not one lucky trial: mean reward -8.55 vs -9.65, mean `rise` 0.0023 vs 0.00095, 5/20 trials with positive `rise` vs 2/20, max `drift` 0.149m vs 0.395m | Confirmed via per-step trace that the lift-phase drift is the same systematic, one-directional per-step bias as before (present from the moment the gripper closes, not a lift-kinematics artifact), just ~3-4x smaller in magnitude after one DAgger round -- matches DAgger's known iterative-convergence behavior, not a one-shot fix. `CORRECTION_CAP` worked: action-noise diagnostic stayed close to smooth-demo scale (mean\|action\| 0.038, vs `bc01`'s 0.031 and `bc02`'s blown-up 0.226), avoiding `bc02`'s regression. New finding exposed now that drift is smaller: on the best trial (seed 18) the grasp itself is rock-solid (object-gripper offset ~2mm, constant, through the whole lift) but `rise` plateaus at 0.068m and never reaches the 0.09m threshold -- a second, previously-masked shortfall (insufficient lift height, not just drift) |
    | `bc05_chunked` | Action chunking instead of per-step DAgger: standalone CNN+MLP regressor predicts a block of 10 future actions from one observation (`train_bc_chunked.py`), executed open-loop, re-planning every 10 steps instead of every step -- same clean 24k `bc03` demos, no DAgger | 0/20, WORSE on average than both `bc03` and `bc04` (mean reward -19.32 vs -9.65/-8.55) despite comparable mean `drift` (0.036, in between `bc03`/`bc04`'s) -- the worse mean comes from a heavy bad tail (12/20 trials below -20 reward, vs 0/20 for `bc03`/`bc04`) | New, chunking-specific failure mode: when a 10-step chunk's assumption breaks mid-execution (grasp not fully secure, object slips), the policy can't react until the chunk ends -- confirmed by trace (seed 0): object flung from the grip around step 80, policy keeps executing the committed lift+hold chunk as if still holding it, then the following re-observation is wildly out-of-distribution and cascades into the arm flying to `grip_xy` near the robot base by episode end (`dist` growing to 0.36m). On the best trial (seed 8) chunking showed something per-step BC never did: `drift` SHRINKING smoothly from 0.057m back to 0.007m over the back half of the episode, a genuinely self-correcting trajectory -- but `rise` still capped at 0.0396m, similar to `bc04`, not better |
+   | `bc05_chunked --adaptive` / `bc06_chunked` | Proprio-keyed re-planning (commit only 1 step once the gripper reads closed) tested on `bc05_chunked`'s existing checkpoint, then on `bc06_chunked`, a retrain with randomized (not fixed-stride) chunk starts meant to make the model queryable off-grid | Both much worse, not better: `bc05_chunked --adaptive` mean reward -49.6 (vs its own fixed-cadence -19.3); `bc06_chunked` collapsed even at ITS OWN fixed cadence (mean reward -54.2, `rise` stuck at reset value and `drift=0.0000` in all 20 trials -- never meaningfully touches the object) | `bc05_chunked --adaptive` confirmed the model was only ever trained to be queried at fixed multiples of 10 -- forcing an off-grid query is a context it never saw, not just a harder one. The random-start retrain meant to fix that (`bc06_chunked`) itself failed to learn a usable policy at all (likely: the same ~2,400 training chunks spread over ~111 possible start positions per episode is too sparse to fit, vs. 12 well-sampled fixed positions) -- the proprio-keyed re-planning idea remains untested, not refuted; testing it properly needs either more demo data or a smarter (not uniform) random-start sampling scheme |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
    `workspace_cam` (left) and `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md).
@@ -414,6 +415,8 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc04` (seed 18, best case -- firm grasp, lift plateaus just short of threshold) | <img src="media/bc04_best_case.gif" width="280"> |
    | `bc05_chunked` (seed 0, worst case -- chunk commitment failure, object flung around step 80) | <img src="media/bc05_chunked.gif" width="280"> |
    | `bc05_chunked` (seed 8, best case -- drift self-corrects over the back half of the episode) | <img src="media/bc05_chunked_best_case.gif" width="280"> |
+   | `bc05_chunked` `--adaptive` (seed 0 -- naive off-grid re-planning, barely functions) | <img src="media/bc05_chunked_adaptive.gif" width="280"> |
+   | `bc06_chunked` (seed 0 -- random-start retrain, never meaningfully touches the object) | <img src="media/bc06_chunked.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -683,6 +686,54 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     open-loop commitment risk. Alternatively, go back to iterating per-step DAgger (`bc04`'s own
     next round), which has a smaller but more reliable track record so far.
 
+17. **Proprio-keyed adaptive re-planning, tried as a 2nd chunking iteration, user: "try both
+    and compare" (both = another DAgger round AND a revised chunking variant) -- a dead end,
+    but an informative one.** Re-traced `bc05_chunked`'s worst trial closely and found the
+    failure wasn't stale-chunk execution after some external shock -- it was the model's OWN
+    freshly-predicted chunk (queried once the gripper was already closed around the object)
+    choosing to reopen partway through its own 10 steps, with no way to notice and react
+    before all 10 were spent. Proprio already carries the one signal that matters here for
+    free: `gripper_qpos` (normalized, 1.0=open/0.0=closed). Added `--adaptive` to
+    `eval_policy_chunked.py`/`demo_chunked.py`: once it reads below `GRIP_CLOSED_THRESH=0.7`,
+    commit only 1 step of the predicted chunk before re-observing (per-step responsiveness
+    exactly where the earlier failure happened), full 10-step chunk otherwise. Tested first on
+    the ALREADY-TRAINED `bc05_chunked` checkpoint -- zero retraining, isolating the execution-
+    policy change as the only variable.
+
+    **Result: catastrophically worse, not better** (mean reward -49.6 vs the same checkpoint's
+    -19.3 at fixed cadence). Root cause, confirmed by checking `build_chunks`: training only
+    ever sampled chunk starts at FIXED multiples of 10 (0, 10, 20, ...) -- the model was never
+    once queried at an off-grid timestep during training. Forcing early re-plans mid-chunk
+    (which is exactly what `--adaptive` does once the gripper closes) asks it to predict from a
+    context it has literally never seen, not just a harder one -- the policy barely functions
+    at all under this condition (`rise` stuck at the reset value in most trials).
+
+    **Tried to fix the test, not just abandon it**: added `--random-starts` to
+    `train_bc_chunked.py` (samples chunk starts uniformly over every timestep, not a fixed
+    stride, same total chunk count so dataset size is unchanged) and retrained from scratch as
+    `bc06_chunked`, specifically so the model COULD be meaningfully queried off-grid before
+    testing `--adaptive` on it fairly. **This retrain itself failed outright**: `bc06_chunked`
+    at its OWN matching fixed cadence already collapsed far below `bc05_chunked` (mean reward
+    -54.2, `rise` stuck at the reset value in all 20 trials, `drift=0.0000` in every single
+    trial -- it never meaningfully touches the object at all, worse than every other attempt in
+    this project including the earliest cold-start RL runs). `--adaptive` on top of that broken
+    base made it marginally worse again (-61.3) but the comparison is moot -- there's no
+    working baseline to test the re-planning idea against. Most likely cause: spreading the
+    same ~2,400 training chunks across a continuum of ~111 possible start positions per episode
+    (instead of 12 fixed, well-sampled ones) collapsed the effective sample density per context
+    far too low for this size of network/dataset to fit a usable policy.
+
+    **Conclusion: the proprio-keyed re-planning idea itself is still untested, not refuted.**
+    What's actually been shown is narrower: (1) a fixed-cadence-trained chunked model cannot
+    be queried off-grid at eval time without retraining for it, and (2) the specific retrain
+    recipe tried here (uniform random starts, same dataset size) isn't sufficient to produce a
+    working off-grid-queryable model. Properly testing the original idea would need either
+    substantially more demo data or a denser/smarter sampling scheme for the random-start
+    training (e.g. biasing starts toward just after the close event, where the risk actually
+    is, rather than uniformly over the whole episode) -- a bigger investment not clearly
+    justified given per-step DAgger (`bc04`) already has the better, more reliable track
+    record of the methods tried so far.
+
 ## Repository layout
 
 ```
@@ -714,7 +765,7 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01-bc05_chunked.gif, bc02-05_best_case.gif, grasp01-08.gif   # every attempt's rollout, see table above
+│   └── bc01-bc06_chunked.gif, bc02-05_best_case.gif, bc05_chunked_adaptive.gif, grasp01-08.gif
 ├── requirements.txt
 └── README.md
 ```
