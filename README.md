@@ -427,6 +427,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc07` (seed 18, highest-rise trial this round) | <img src="media/bc07.gif" width="280"> |
    | `bc08` (seed 0, auxiliary z-loss, low drift but modest lift) | <img src="media/bc08.gif" width="280"> |
    | `bc08` (seed 17, highest-rise trial this round) | <img src="media/bc08_best_case.gif" width="280"> |
+   | Yaw-alignment comparison: scripted expert (left, flush, align_err~1.7deg mean) vs `bc08` seed 4 (right, corner grab, align_err~20deg) -- item 22's root cause | <img src="media/yaw_alignment_comparison.png" width="560"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -903,6 +904,47 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     different parts of the problem (correction magnitude vs. representation quality) rather than
     competing fixes for the same one.
 
+22. **A third learned-bias axis, spotted again from `bc08`'s GIFs: the gripper's jaws not
+    squared up with the cube's flat side, a corner/edge grab instead of a flush two-face pinch
+    -- the user asked whether the expert demos show this same kind of variation.** Checked
+    directly rather than assumed, since the scene actually randomizes object yaw heavily on
+    every reset (`best_oriented_ik`'s position-only IK solve lands on an arbitrary gripper roll
+    per trial, and `object_yaw_for_gripper` spawns the OBJECT'S yaw to match it, not the other
+    way around -- see `eval_stage2_reach_grasp.py`). Measured gripper-closing-axis vs. object
+    flat-face-normal angular error (mod 90 deg, the box's cross-section is square so 4
+    equally-valid alignments exist) at the same stabilized close-moment used for item 19's
+    z-offset check, for the scripted expert, `bc06`, and `bc08`.
+
+    **Confirmed: the expert data has enormous yaw variation (object yaw spans the full
+    -163 deg to +180 deg range across 20 episodes, essentially the whole circle) but the
+    alignment ERROR stays small throughout (mean 1.7 deg, max 5.7 deg) -- by construction, since
+    the object is spawned to match whatever orientation the gripper's IK landed on, every demo
+    is a flush grip.** So yes, the expert data shows this variation -- extensively -- and always
+    resolves it correctly, the same shape of gap as item 19's height bug: a continuous quantity
+    (here orientation, there height) that must be visually inferred per-episode, fully varied in
+    the training data, always correct in the label, but imperfectly reproduced by the trained
+    policy. `bc06` (mean 5.2 deg, max 25.2 deg) and `bc08` (mean 6.5 deg, max 19.7 deg) are both
+    roughly 3x worse than the expert on average, with occasional severe (~20-25 deg)
+    misalignments. Visual confirmation in `media/yaw_alignment_comparison.png`: `bc08`'s worst
+    case (seed 4, ~20 deg error) shows only a thin corner of the cube caught between the jaws,
+    most of the cube hanging off to the side -- exactly the "claws not aligned with the side"
+    symptom, and exactly the kind of small-contact-area, off-axis grip that would be slippery
+    under the lift's own momentum. (Caveat on the correlation numbers: the close-moment
+    detector also fires in a few trials where the gripper closes on empty air nowhere near the
+    object -- e.g. `bc08` seed 1's "good" 1.4 deg reading is from a totally separate miss, not a
+    real contact -- so the cleanest comparison is among trials that get a real lift at all:
+    there, `bc08`'s smallest alignment error, 2.3 deg, belongs to its single best-rise trial.)
+
+    **Not yet discussed with the user**: this is a third distinct axis (alongside height and
+    lateral drift) where the trained policy is measurably less precise than the expert, and
+    none of the fixes tried so far (capped DAgger correction, the auxiliary z-loss) specifically
+    targets rotation. The same auxiliary-task recipe used for height (item 21) could be adapted
+    here just as cheaply -- object yaw is NOT a scene constant like height was, but it's still
+    fully recoverable at train time from the saved object orientation if that gets added to
+    future data collection, or approximated from the FK'd gripper orientation at the moment the
+    scripted/DAgger expert actually closes (since the expert's own close-time gripper yaw IS the
+    correct label, by construction).
+
 ## Repository layout
 
 ```
@@ -936,7 +978,7 @@ panda_vision_grasp/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
-│       grasp_height_comparison.png
+│       grasp_height_comparison.png, yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
