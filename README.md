@@ -387,6 +387,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc04` | DAgger round 2 (on `bc03` this time, dual-camera), with `CORRECTION_CAP=0.15` added to avoid `bc02`'s label-noise regression -- merged with the original 24k `bc03` demos (48k total), retrained from scratch | 0/20, but a BROAD improvement over `bc03`, not one lucky trial: mean reward -8.55 vs -9.65, mean `rise` 0.0023 vs 0.00095, 5/20 trials with positive `rise` vs 2/20, max `drift` 0.149m vs 0.395m | Confirmed via per-step trace that the lift-phase drift is the same systematic, one-directional per-step bias as before (present from the moment the gripper closes, not a lift-kinematics artifact), just ~3-4x smaller in magnitude after one DAgger round -- matches DAgger's known iterative-convergence behavior, not a one-shot fix. `CORRECTION_CAP` worked: action-noise diagnostic stayed close to smooth-demo scale (mean\|action\| 0.038, vs `bc01`'s 0.031 and `bc02`'s blown-up 0.226), avoiding `bc02`'s regression. New finding exposed now that drift is smaller: on the best trial (seed 18) the grasp itself is rock-solid (object-gripper offset ~2mm, constant, through the whole lift) but `rise` plateaus at 0.068m and never reaches the 0.09m threshold -- a second, previously-masked shortfall (insufficient lift height, not just drift) |
    | `bc05_chunked` | Action chunking instead of per-step DAgger: standalone CNN+MLP regressor predicts a block of 10 future actions from one observation (`train_bc_chunked.py`), executed open-loop, re-planning every 10 steps instead of every step -- same clean 24k `bc03` demos, no DAgger | 0/20, WORSE on average than both `bc03` and `bc04` (mean reward -19.32 vs -9.65/-8.55) despite comparable mean `drift` (0.036, in between `bc03`/`bc04`'s) -- the worse mean comes from a heavy bad tail (12/20 trials below -20 reward, vs 0/20 for `bc03`/`bc04`) | New, chunking-specific failure mode: when a 10-step chunk's assumption breaks mid-execution (grasp not fully secure, object slips), the policy can't react until the chunk ends -- confirmed by trace (seed 0): object flung from the grip around step 80, policy keeps executing the committed lift+hold chunk as if still holding it, then the following re-observation is wildly out-of-distribution and cascades into the arm flying to `grip_xy` near the robot base by episode end (`dist` growing to 0.36m). On the best trial (seed 8) chunking showed something per-step BC never did: `drift` SHRINKING smoothly from 0.057m back to 0.007m over the back half of the episode, a genuinely self-correcting trajectory -- but `rise` still capped at 0.0396m, similar to `bc04`, not better |
    | `bc05_chunked --adaptive` / `bc06_chunked` | Proprio-keyed re-planning (commit only 1 step once the gripper reads closed) tested on `bc05_chunked`'s existing checkpoint, then on `bc06_chunked`, a retrain with randomized (not fixed-stride) chunk starts meant to make the model queryable off-grid | Both much worse, not better: `bc05_chunked --adaptive` mean reward -49.6 (vs its own fixed-cadence -19.3); `bc06_chunked` collapsed even at ITS OWN fixed cadence (mean reward -54.2, `rise` stuck at reset value and `drift=0.0000` in all 20 trials -- never meaningfully touches the object) | `bc05_chunked --adaptive` confirmed the model was only ever trained to be queried at fixed multiples of 10 -- forcing an off-grid query is a context it never saw, not just a harder one. The random-start retrain meant to fix that (`bc06_chunked`) itself failed to learn a usable policy at all (likely: the same ~2,400 training chunks spread over ~111 possible start positions per episode is too sparse to fit, vs. 12 well-sampled fixed positions) -- the proprio-keyed re-planning idea remains untested, not refuted; testing it properly needs either more demo data or a smarter (not uniform) random-start sampling scheme |
+   | `bc06` (note: unrelated to `bc06_chunked` above) | DAgger round 3 -- NOTE run-name collision in naming only, not data: `bc06` is the 2nd per-step DAgger iteration (on `bc04`'s own rollouts, same `CORRECTION_CAP=0.15`), merged CUMULATIVELY with all prior rounds (`demos_dagger3.npz` 48k + `dagger04.npz` 24k = 72k total, proper DAgger convention of keeping every round, not just the latest) | 0/20, but the best result in the whole project: mean reward -7.99 (best yet), mean `rise` 0.0253 (11x `bc04`'s), 7/20 trials with positive `rise`, 3/20 trials EXCEEDING the 0.09m rise threshold outright, 14/20 under the 0.04m drift threshold. Best trial (seed 12) crosses the rise threshold comfortably by step 85 and reaches `rise=0.1158m` by episode end, failing ONLY on `drift=0.0515m` -- just 1.3x over the limit | Confirmed via trace: the SAME systematic one-directional drift bias as every prior round, continuing to shrink with each DAgger iteration (this round's worst-case drift is well below `bc04`'s). Action-noise diagnostic confirms the capped-correction discipline held through a 2nd cumulative round too (mean\|action\| 0.041, in line with `bc04`'s 0.038, nowhere near `bc02`'s uncapped 0.226). This is the first run where a single trial is close enough that one more DAgger round looks genuinely likely to cross the finish line |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
    `workspace_cam` (left) and `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md).
@@ -417,6 +418,9 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc05_chunked` (seed 8, best case -- drift self-corrects over the back half of the episode) | <img src="media/bc05_chunked_best_case.gif" width="280"> |
    | `bc05_chunked` `--adaptive` (seed 0 -- naive off-grid re-planning, barely functions) | <img src="media/bc05_chunked_adaptive.gif" width="280"> |
    | `bc06_chunked` (seed 0 -- random-start retrain, never meaningfully touches the object) | <img src="media/bc06_chunked.gif" width="280"> |
+   | `bc06` (seed 0, note: unrelated to `bc06_chunked` above -- naming collision, not data) | <img src="media/bc06.gif" width="280"> |
+   | `bc06` (seed 12, best case -- rise crosses the success threshold, fails only on drift) | <img src="media/bc06_best_case.gif" width="280"> |
+   | `bc06` (seed 13, the other near-miss -- drift stays under threshold, rise falls just short) | <img src="media/bc06_near_miss_drift_ok.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -734,6 +738,46 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     justified given per-step DAgger (`bc04`) already has the better, more reliable track
     record of the methods tried so far.
 
+18. **DAgger round 3 on `bc04` (`bc06`) -- the best result in the project, run in parallel
+    with item 17 above per the user's "try both and compare" request.** Same recipe as
+    `bc03`->`bc04` (`CORRECTION_CAP=0.15`, rollout `bc04`'s own policy, relabel with fresh
+    corrections), but this time merged CUMULATIVELY with every prior round rather than just the
+    latest -- `demos_dagger3.npz` (48k: original clean demos + round-1 DAgger on `bc03`) +
+    `dagger04.npz` (24k: round-2 DAgger on `bc04`) = 72k total -- the textbook DAgger convention
+    of aggregating all rounds' data, not replacing it.
+
+    **Result: still 0/20, but a clean, decisive jump over `bc04`, not a marginal one.** Mean
+    reward -7.99 (best of any run in the project), mean `rise` 0.0253 (11x `bc04`'s 0.0023),
+    7/20 trials with positive `rise` (vs 5/20), and for the first time ever, 3/20 trials
+    EXCEEDED the 0.09m rise threshold outright (`bc04` never had any). The best trial (seed 12)
+    crosses the threshold comfortably by control step 85 and reaches `rise=0.1158m` by episode
+    end -- a solid, unambiguous lift, not a borderline one -- failing ONLY on `drift=0.0515m`,
+    just 1.3x over the 0.04m limit. Traced it step by step: the drift is the exact same
+    systematic one-directional bias every prior round showed (growing smoothly from the moment
+    the gripper closes around step 35), just smaller again -- consistent with each DAgger round
+    continuing to shrink it. The action-noise diagnostic confirms `CORRECTION_CAP` is still
+    doing its job through a 2nd cumulative round (mean\|action\| 0.041, same ballpark as `bc04`'s
+    0.038, nowhere near `bc02`'s uncapped 0.226).
+
+    **Comparing both of this round's results directly, as asked**: per-step DAgger (`bc06`)
+    continues to deliver clean, compounding, broad gains every round it's been tried (`bc01`-
+    >`bc02` fixed alignment; `bc03`->`bc04` cut lift drift 3-4x; `bc04`->`bc06` cut it further
+    and nearly cleared the success bar on individual trials) -- it has never once made things
+    worse when the correction magnitude is capped. Action chunking, by contrast, has not
+    produced a single net-positive result across three attempts this project (fixed-cadence
+    `bc05_chunked`: worse mean reward than per-step BC despite similar drift; naive adaptive
+    re-planning on the same checkpoint: catastrophic; a retrain meant to support adaptive
+    re-planning: failed to learn anything at all). Its only real contribution so far is a
+    negative-but-informative one: chunked BC policies are brittle to being queried off their
+    training-time re-planning grid, a real constraint on receding-horizon designs that per-step
+    methods don't have to worry about.
+
+    **Not yet discussed with the user**: given this trial run's margin (rise comfortably over
+    threshold, drift only ~30% over), a 3rd per-step DAgger round on `bc06` looks like the
+    single most promising next step in the project -- genuinely plausible to produce the first
+    actual success. Chunking could still be revisited later with a better-resourced random-
+    start retrain, but per-step DAgger is clearly the stronger lever right now.
+
 ## Repository layout
 
 ```
@@ -765,7 +809,7 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01-bc06_chunked.gif, bc02-05_best_case.gif, bc05_chunked_adaptive.gif, grasp01-08.gif
+│   └── bc01-bc06.gif, bc02-06_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif
 ├── requirements.txt
 └── README.md
 ```
