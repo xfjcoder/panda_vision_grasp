@@ -384,12 +384,15 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `grasp08` | Same as `grasp07`, plus a new `W_SMOOTH * ||a_t - a_t-1||^2` action-rate penalty (see below) | 0/20, same retreat pattern as `grasp07` (`dist` never drops below its 0.157m start, climbs to 0.27-0.34m); oscillation somewhat reduced (raw smoothness total 168 vs `grasp01`'s 1675) but swamped by the same avoidance behavior | Confirms the failure is the proximity-gated penalty's design, not oscillation -- adding the smoothness fix on top didn't change the core problem |
    | `bc02` | One DAgger round on `bc01`: relabeled 200 `bc01`-driven rollouts with fresh expert corrections, merged with the original 24k demos (48k total), retrained from scratch | 0/20, mean reward WORSE than `bc01` (-18.2 vs -8.8), but best trial's `rise` 2.4x higher (0.0282m vs 0.0115m) with visually confirmed correct centering at the close phase | Fixed the targeted compounding-drift/alignment problem (confirmed via wrist-cam frames) but the correction labels are inherently noisier/larger than the original smooth demos, teaching a noisier overall policy (sign-flip rate 0.56 vs `bc01`'s 0.02) -- net regression on average despite fixing the specific failure mode |
    | `bc03` | Wrist camera (`wrist_cam`) promoted to a real policy input alongside `workspace_cam`; fresh demo collection + plain BC, no DAgger | 0/20, but best trial `rise=0.0885m` (3x `bc02`'s best), object genuinely grasped and held through the whole lift -- failed only on `drift=0.2444m` (lift-phase lateral precision, not alignment) | Closest result to success in the whole project: the alignment/grasping problem blocking every prior attempt is essentially solved for this case; the remaining gap narrowed to lift-phase lateral drift |
+   | `bc04` | DAgger round 2 (on `bc03` this time, dual-camera), with `CORRECTION_CAP=0.15` added to avoid `bc02`'s label-noise regression -- merged with the original 24k `bc03` demos (48k total), retrained from scratch | 0/20, but a BROAD improvement over `bc03`, not one lucky trial: mean reward -8.55 vs -9.65, mean `rise` 0.0023 vs 0.00095, 5/20 trials with positive `rise` vs 2/20, max `drift` 0.149m vs 0.395m | Confirmed via per-step trace that the lift-phase drift is the same systematic, one-directional per-step bias as before (present from the moment the gripper closes, not a lift-kinematics artifact), just ~3-4x smaller in magnitude after one DAgger round -- matches DAgger's known iterative-convergence behavior, not a one-shot fix. `CORRECTION_CAP` worked: action-noise diagnostic stayed close to smooth-demo scale (mean\|action\| 0.038, vs `bc01`'s 0.031 and `bc02`'s blown-up 0.226), avoiding `bc02`'s regression. New finding exposed now that drift is smaller: on the best trial (seed 18) the grasp itself is rock-solid (object-gripper offset ~2mm, constant, through the whole lift) but `rise` plateaus at 0.068m and never reaches the 0.09m threshold -- a second, previously-masked shortfall (insufficient lift height, not just drift) |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
-   `workspace_cam` (left, the view the policy itself sees) and `wrist_cam` (right, an
-   eye-in-hand camera added later purely for visualization -- see NOTICE.md -- never part of
-   any policy's actual observation), seed 0 for all nine so the object's start position is
-   identical across runs and only the policy's behavior differs:
+   `workspace_cam` (left) and `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md).
+   For `grasp01`-`08` and `bc01`/`bc02` the right panel is visualization only, added after the
+   fact; neither camera's content changes those checkpoints' behavior. From `bc03` onward
+   `wrist_cam` is ALSO a real policy input (see item 14), so for those two rows the right panel
+   is literally part of what the policy saw. Seed 0 for all rows so the object's start position
+   is identical and only the policy's behavior differs:
 
    | Run | Rollout |
    |---|---|
@@ -406,6 +409,8 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc02` (seed 18, best case -- object correctly centered at close phase) | <img src="media/bc02_best_case.gif" width="280"> |
    | `bc03` (seed 0) | <img src="media/bc03.gif" width="280"> |
    | `bc03` (seed 9, best case -- grasped and held through the whole lift) | <img src="media/bc03_best_case.gif" width="280"> |
+   | `bc04` (seed 0) | <img src="media/bc04.gif" width="280"> |
+   | `bc04` (seed 18, best case -- firm grasp, lift plateaus just short of threshold) | <img src="media/bc04_best_case.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -570,6 +575,57 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     matter more now that the dominant alignment blocker is mostly resolved -- or a fix aimed
     specifically at lift-phase lateral drift.
 
+15. **DAgger round 2, targeting lift-phase drift specifically (`bc04`) -- DONE, a broad but
+    partial improvement.** First traced `bc03`'s own best and worst trials step by step
+    (`obj_xy`/`grip_xy`/`finger_q` logged every 5 control steps) to find out whether the
+    drift was a lift-kinematics artifact (the arm's vertical path bowing sideways) or
+    something else. **It's something else**: drift starts accumulating the moment the gripper
+    begins closing (around step 30, ~30 steps before any lift motion starts) and grows almost
+    linearly, in one consistent direction, all the way to episode end. That is a small,
+    systematic per-control-step bias in the network's output once the gripper is closed,
+    integrated open-loop for ~90 steps with zero corrective signal -- mechanically identical to
+    the compounding-error problem that caused the original close-phase alignment failure
+    (`bc01`->`bc02`), just surfacing in the closed/lift/hold regime instead of the approach
+    regime. The only mechanism in this project that supplies a "you've drifted, here's the way
+    back" signal is DAgger, so the fix for this IS another DAgger round, not a separate patch.
+
+    Applied `bc02`'s own lesson before running it again: `bc02`'s correction labels saturated
+    the full `clip(-1, 1)` range whenever drift was large, producing jerky, oversized labels
+    that made the aggregate-trained policy noisier everywhere, not just where it was drifting
+    (sign-flip rate 0.56 vs `bc01`'s 0.02) -- a net regression despite fixing the targeted
+    problem. Added `CORRECTION_CAP = 0.15` to `collect_dagger.py` (~5x `bc01`'s smooth-demo
+    mean\|action\| of 0.031, far short of a full-rate snap) so every correction label points the
+    right direction without ever teaching a violent correction. Rolled out `bc03`'s own policy
+    for 200 episodes (0/200, 2 succeeded this particular sweep -- consistent with the eval's 0/20
+    given rendering isn't bit-reproducible across runs), relabeled with the capped correction,
+    merged with the original 24k dual-camera demos into a 48k aggregate, retrained from scratch
+    as `bc04` (`train_bc.py`, unmodified).
+
+    **Result: still 0/20, but a genuine broad improvement this time, not one lucky trial.**
+    Over the same 20 eval seeds: mean reward -8.55 vs `bc03`'s -9.65, mean `rise` 0.0023 vs
+    0.00095 (2.4x), 5/20 trials with positive `rise` vs 2/20, max `drift` across all trials down
+    from 0.395m to 0.149m. The action-noise diagnostic confirms the capped-correction lesson
+    held: `bc04`'s mean\|action\| is 0.038 (close to `bc01`'s clean 0.031), nowhere near `bc02`'s
+    blown-up 0.226 -- this round didn't repeat `bc02`'s regression. Re-tracing the best trial
+    (seed 18) step by step: the grasp itself is now rock-solid (object-gripper offset ~2mm,
+    constant, through the entire lift -- a genuinely rigid grip), and drift is the same
+    systematic one-directional bias as `bc03` had, just ~3-4x smaller (0.067m vs a comparable
+    0.21-0.25m trace on `bc03`'s worst cases). This matches DAgger's known behavior: one round
+    shrinks the compounding error, it doesn't eliminate it in one shot.
+
+    **New finding, only visible now that drift shrank**: on that same seed-18 trial, `rise`
+    plateaus at 0.068m and stops climbing well before the 0.09m success threshold, even though
+    the grasp is solid and the arm has stopped moving (holding position) -- a second, previously
+    masked shortfall. With `drift` at 0.40m on `bc03`'s worst cases, lift height was never the
+    binding constraint; now that drift is smaller, insufficient lift height is visible as its
+    own problem, distinct from lateral precision.
+
+    **Not yet discussed with the user**: natural next steps are (a) a further DAgger round
+    (iterate again on `bc04`'s own rollouts, same capped-correction recipe -- DAgger is
+    expected to need several rounds, and this round's trend was a clean 3-4x drift reduction),
+    or (b) look specifically at why the learned lift trajectory undershoots the full
+    `LIFT_HEIGHT` even when nothing else is going wrong.
+
 ## Repository layout
 
 ```
@@ -598,7 +654,7 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01-bc03.gif, bc02/bc03_best_case.gif, grasp01-08.gif   # every attempt's rollout, see table above
+│   └── bc01-bc04.gif, bc02/bc03/bc04_best_case.gif, grasp01-08.gif   # every attempt's rollout, see table above
 ├── requirements.txt
 └── README.md
 ```
