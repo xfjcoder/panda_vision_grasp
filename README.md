@@ -389,6 +389,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc05_chunked --adaptive` / `bc06_chunked` | Proprio-keyed re-planning (commit only 1 step once the gripper reads closed) tested on `bc05_chunked`'s existing checkpoint, then on `bc06_chunked`, a retrain with randomized (not fixed-stride) chunk starts meant to make the model queryable off-grid | Both much worse, not better: `bc05_chunked --adaptive` mean reward -49.6 (vs its own fixed-cadence -19.3); `bc06_chunked` collapsed even at ITS OWN fixed cadence (mean reward -54.2, `rise` stuck at reset value and `drift=0.0000` in all 20 trials -- never meaningfully touches the object) | `bc05_chunked --adaptive` confirmed the model was only ever trained to be queried at fixed multiples of 10 -- forcing an off-grid query is a context it never saw, not just a harder one. The random-start retrain meant to fix that (`bc06_chunked`) itself failed to learn a usable policy at all (likely: the same ~2,400 training chunks spread over ~111 possible start positions per episode is too sparse to fit, vs. 12 well-sampled fixed positions) -- the proprio-keyed re-planning idea remains untested, not refuted; testing it properly needs either more demo data or a smarter (not uniform) random-start sampling scheme |
    | `bc06` (note: unrelated to `bc06_chunked` above) | DAgger round 3 -- NOTE run-name collision in naming only, not data: `bc06` is the 2nd per-step DAgger iteration (on `bc04`'s own rollouts, same `CORRECTION_CAP=0.15`), merged CUMULATIVELY with all prior rounds (`demos_dagger3.npz` 48k + `dagger04.npz` 24k = 72k total, proper DAgger convention of keeping every round, not just the latest) | 0/20, but the best result in the whole project: mean reward -7.99 (best yet), mean `rise` 0.0253 (11x `bc04`'s), 7/20 trials with positive `rise`, 3/20 trials EXCEEDING the 0.09m rise threshold outright, 14/20 under the 0.04m drift threshold. Best trial (seed 12) crosses the rise threshold comfortably by step 85 and reaches `rise=0.1158m` by episode end, failing ONLY on `drift=0.0515m` -- just 1.3x over the limit | Confirmed via trace: the SAME systematic one-directional drift bias as every prior round, continuing to shrink with each DAgger iteration (this round's worst-case drift is well below `bc04`'s). Action-noise diagnostic confirms the capped-correction discipline held through a 2nd cumulative round too (mean\|action\| 0.041, in line with `bc04`'s 0.038, nowhere near `bc02`'s uncapped 0.226). This is the first run where a single trial is close enough that one more DAgger round looks genuinely likely to cross the finish line |
    | `bc07` | DAgger round 4 (3rd per-step iteration, on `bc06`'s own rollouts, same `CORRECTION_CAP=0.15`), merged cumulatively with every prior round (`demos_dagger4.npz` 72k + `dagger05.npz` 24k = 96k total) -- launched directly off the user's visual observation that `bc06`'s gallery GIFs show the gripper closing near the TOP tip of the cube rather than centered, prompting a quantitative check (see below) before this round even finished training | 0/20, mixed vs `bc06`: mean reward WORSE (-9.02 vs -7.99) and the best-rise trials now carry MORE drift (up to 0.098m vs `bc06`'s best 0.052m), but 10/20 trials now get positive `rise` (vs 7/20) and the action-noise diagnostic, while still far from `bc02`'s blown-up regime, ticked up again (mean\|action\| 0.052, vs `bc04`'s 0.038 and `bc06`'s 0.041 -- a 3-round upward trend worth watching) | **The real finding is a newly-quantified vertical grasp-height bug, not this round's net result.** Measured the vertical offset between the gripper site and the object's center at the moment the gripper finishes closing (stabilized, 15 steps after first closing below 75%): the scripted expert grasps almost perfectly centered (mean offset 0.0003m across 20 episodes) but `bc04` and `bc06` both grasp ~0.049m high -- most of the way from the cube's center (half-height 0.03m) past its top edge -- confirmed visually (`media/grasp_height_comparison.png`, expert vs `bc06` wrist-cam at the close moment). This bias is INVARIANT across two full cumulative DAgger rounds (`bc04`: 0.0488m, `bc06`: 0.0489m, same to 3 decimal places) -- it long predates `bc06` and was being completely masked by the drift-focused analysis, since many of its worst cases (offset >0.05m) simply never lift the object at all (`rise` stuck at the reset baseline), trivially producing near-zero `drift` and hiding the real cause as "no grasp" rather than "bad grasp." `bc07` is the first round to visibly move this number (0.033m, down ~1/3), which is why more trials now attempt a lift at all -- but the same correction signal that's fixing vertical placement is simultaneously getting noisier overall (the mean\|action\| creep above), which is the most likely explanation for the worse drift on this round's successful lifts. Since the expert itself is dead-center, this is purely a policy-learned bias, not a flawed label -- plausibly a depth/scale misjudgment from the camera views rather than a label-noise problem, which per-step DAgger's correction signal only partially addresses |
+   | `bc08` | Auxiliary z-error loss (`train_bc_auxz.py`): a small head on the BC policy's shared actor features predicts the FK-derived vertical grasp-height offset (a scene constant, so no privileged per-episode labels needed), trained jointly with the usual action MSE -- same `bc06` 72k dataset, no new DAgger data, to isolate this one change. First motivated by a depth-parallax probe (below) confirming `wrist_cam`'s apparent object size is a strong, monotonic depth cue (361px at correct height down to 28-75px at 3-8cm too high) while `workspace_cam` carries ~none (flat ~1215px throughout) | 0/20, best mean reward in the project (-7.22, vs `bc06`'s -7.99) and the first round-over-round DROP in action noise (mean\|action\| 0.026, vs `bc06`'s 0.041/`bc07`'s 0.052) -- but the targeted bug did NOT improve: mean vertical offset 0.056m, slightly WORSE than `bc06`'s 0.049m, with fewer trials even attempting a lift (4/20 positive `rise` vs `bc06`'s 7/20) | Auxiliary MSE converged cleanly in training (1.0 -> 0.0034 normalized over 20 epochs) -- the shared trunk CAN represent this quantity precisely from the demo distribution -- but that representation didn't translate into better height-targeting behavior at rollout. A real auxiliary-task pitfall: the trunk can satisfy an auxiliary loss using features the action head's own downstream layers never end up relying on, especially across the open-loop-training / closed-loop-rollout distribution shift every BC method here faces. The best-mean-reward result looks like a side effect of a smoother, lower-magnitude policy from the extra regularizing pressure, not of fixing the specific bug it targeted |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
    `workspace_cam` (left) and `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md).
@@ -424,6 +425,8 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc06` (seed 13, the other near-miss -- drift stays under threshold, rise falls just short) | <img src="media/bc06_near_miss_drift_ok.gif" width="280"> |
    | Grasp-height comparison: scripted expert (left, dead-center, offset 0.0003m) vs `bc06` (right, grasping near the top tip, offset 0.049m) -- the root cause behind item 19 below | <img src="media/grasp_height_comparison.png" width="560"> |
    | `bc07` (seed 18, highest-rise trial this round) | <img src="media/bc07.gif" width="280"> |
+   | `bc08` (seed 0, auxiliary z-loss, low drift but modest lift) | <img src="media/bc08.gif" width="280"> |
+   | `bc08` (seed 17, highest-rise trial this round) | <img src="media/bc08_best_case.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -834,6 +837,72 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     resolve this precisely) looks more promising now than another undifferentiated cumulative
     DAgger round.
 
+20. **Depth-parallax probe: does the wrist camera even carry the signal needed to fix item 19's
+    bug?** Before building anything, checked whether the information to fix the vertical-grasp
+    bias is actually available to the policy at all. Built a standalone probe (no trained policy)
+    that uses IK to place the arm (gripper closed, matching the close-phase visual configuration)
+    at a fixed object x/y and a sweep of vertical offsets from the correct grasp height (-2cm to
+    +8cm), rendering both cameras at the ACTUAL 64x64 training resolution at each offset and
+    measuring the cube's apparent pixel footprint via simple color segmentation.
+
+    **Result: `workspace_cam` is nearly blind to this (1211-1218px across the whole -2cm..+8cm
+    sweep, flat), `wrist_cam` is sharply and monotonically sensitive** -- 1382px at -2cm (too
+    low) down to 361px at the correct height down to 28-75px at +3cm to +8cm (too high). This
+    makes sense in hindsight: `workspace_cam` is a fixed external view of a stationary object, so
+    the gripper's own height barely changes the object's appearance in it; `wrist_cam` is
+    eye-in-hand, so its distance-to-object directly controls the object's apparent scale --
+    classic monocular depth-from-scale, not binocular parallax, but functionally the same
+    information. Conclusion: the signal needed to fix item 19's bug IS present and strong in the
+    wrist camera -- this is an underused-signal problem, not a missing-information one, which is
+    what directly motivated trying an auxiliary loss (item 21) rather than e.g. a 3rd camera or
+    different camera placement.
+
+21. **Auxiliary z-error loss (`bc08`), trained on `bc06`'s own 72k dataset (not `bc07`'s 96k) to
+    isolate this one change from the 4th DAgger round tested in parallel.** Added a small linear
+    head reading the BC policy's actor latent features (`train_bc_auxz.py`, same PPO
+    `MultiInputPolicy` and per-step MSE recipe as every other `bc0N` run) to predict the
+    gripper site's vertical FK-derived offset from the grasp target -- a scene CONSTANT (table
+    height + the object's fixed half-size; only x/y is ever randomized), so the label needs no
+    privileged per-episode data, just forward-kinematics-ing each transition's own proprio
+    (`mj_kinematics`, ~0.002ms/call, the whole 72k-transition dataset labeled in well under a
+    second). Backpropagates through the SAME shared trunk the action head uses, via a combined
+    loss (`action_mse + aux_weight * aux_mse`); discarded at eval time, no eval-path changes
+    needed. **Bug caught before the real run**: saving `aux_head`'s parameters as an added group
+    on the policy's own optimizer broke `PPO.load`'s optimizer-state restore ("different number
+    of parameter groups") -- fixed by giving `aux_head` its own separate optimizer; gradients
+    still flow into the shared trunk identically either way, since that depends on the
+    autograd graph, not which optimizer object calls `.step()`.
+
+    **Training converged cleanly on its own objective**: the auxiliary MSE (normalized units)
+    dropped from 1.0 to 0.0034 over 20 epochs -- the shared trunk really can predict this
+    quantity precisely from the demo distribution. **Result in actual closed-loop rollout:
+    mixed, and on the specific hypothesis, a negative one.** Mean reward IS the best in the
+    project (-7.22, beating `bc06`'s -7.99), and action noise dropped sharply (mean\|action\|
+    0.026, well below `bc06`'s 0.041 and `bc07`'s 0.052, the first round-over-round DROP in that
+    diagnostic) -- but the targeted vertical-offset bug did NOT improve: mean offset 0.056m,
+    slightly WORSE than `bc06`'s 0.049m, not better. Fewer trials even attempt a lift as a
+    result (4/20 positive `rise`, vs `bc06`'s 7/20 and `bc07`'s 10/20); 2 trials never showed a
+    clean open-then-close gripper cycle at all during the 15-step settle window used to measure
+    the offset.
+
+    **Honest read**: the auxiliary task succeeded at ITS OWN objective (the trunk can represent
+    this quantity precisely on the training distribution) without that representation
+    translating into better height-targeting behavior at rollout time -- a real auxiliary-task
+    pitfall: a shared trunk can learn to satisfy an auxiliary loss using features the action
+    head's own downstream layers never end up relying on, especially across the open-loop
+    (teacher-forced) training / closed-loop (rollout) distribution shift that every BC method
+    here has to contend with. The best-mean-reward result is real but looks like a side effect
+    of the auxiliary task's regularizing pressure producing an overall smoother, lower-magnitude
+    policy, not of it fixing the specific bug it was designed for.
+
+    **Not yet discussed with the user**: neither the 4th DAgger round (`bc07`) nor the auxiliary
+    z-loss (`bc08`) fixed the vertical-grasp bias in isolation -- `bc07` nudged it (0.049->0.033)
+    at the cost of overall noise/drift, `bc08` didn't move it at all despite perfecting the
+    auxiliary objective itself. Worth considering: combining both on the SAME dataset (`bc07`'s
+    96k dagger-cumulative data, auxiliary z-loss recipe), since they may be addressing
+    different parts of the problem (correction magnitude vs. representation quality) rather than
+    competing fixes for the same one.
+
 ## Repository layout
 
 ```
@@ -854,6 +923,7 @@ panda_vision_grasp/
 ├── collect_demos.py                  # Stage 5: BC dataset from the scripted controller
 ├── collect_dagger.py                 # Stage 5: DAgger correction pass on a trained BC policy
 ├── train_bc.py                       # Stage 5: behavior-cloning pretrain on PPO's own network
+├── train_bc_auxz.py                  # Stage 5: BC + auxiliary FK-derived z-error loss
 ├── train_bc_chunked.py               # Stage 5: standalone action-chunking BC (not SB3-based)
 ├── eval_policy_chunked.py            # Stage 5: 20-trial eval for a chunked-BC checkpoint
 ├── demo_chunked.py                   # Stage 5: renders a chunked-BC policy's rollout
@@ -865,7 +935,7 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01-bc07.gif, bc02-06_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
+│   └── bc01-bc08.gif, bc02-08_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
 │       grasp_height_comparison.png
 ├── requirements.txt
 └── README.md
