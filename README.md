@@ -428,6 +428,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc08` (seed 0, auxiliary z-loss, low drift but modest lift) | <img src="media/bc08.gif" width="280"> |
    | `bc08` (seed 17, highest-rise trial this round) | <img src="media/bc08_best_case.gif" width="280"> |
    | Yaw-alignment comparison: scripted expert (left, flush, align_err~1.7deg mean) vs `bc08` seed 4 (right, corner grab, align_err~20deg) -- item 22's root cause | <img src="media/yaw_alignment_comparison.png" width="560"> |
+   | `bc09` (seed 5, yaw aux loss -- worst yaw error in the whole project, 43deg, item 23) | <img src="media/bc09_worst_yaw.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -945,6 +946,62 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     scripted/DAgger expert actually closes (since the expert's own close-time gripper yaw IS the
     correct label, by construction).
 
+23. **All four fix combinations tried, one by one and together, as asked: a yaw auxiliary loss
+    (`bc09`), z+yaw combined (`bc10`), z alone on `bc07`'s 96k DAgger-round-4 data instead of
+    `bc06`'s 72k (`bc11`), and z+yaw combined on that same 96k data (`bc12`).** `train_bc_auxz.py`
+    was generalized to a `--aux {z,yaw,both}` flag; the yaw label uses each episode's own
+    final-step gripper yaw (FK'd from that transition's proprio, same as the z label) as a proxy
+    for "the orientation this episode actually settled on," since object pose isn't saved
+    per-transition in the dataset -- cheap and needs no new data collection, but inherits
+    whatever error a badly-diverged DAgger rollout's own final pose has.
+
+    **Full comparison (reward / positive-rise count / z-offset / mean yaw-align error, max) against
+    the three established checkpoints:**
+
+    | Run | Data | Mean reward | Positive rise | z-offset | yaw align err (mean/max) |
+    |---|---|---|---|---|---|
+    | `bc06` (baseline) | 72k | -7.99 | 7/20 | 0.049m | 5.24 / 25.2 deg |
+    | `bc07` (DAgger r4) | 96k | -9.02 | 10/20 | 0.033m | 5.28 / 26.9 deg |
+    | `bc08` (z aux) | 72k | -7.22 | 4/20 | 0.056m | 6.53 / 19.7 deg |
+    | `bc09` (yaw aux) | 72k | -8.39 | **0/20** | 0.054m | **11.15 / 43.0 deg** |
+    | `bc10` (z+yaw aux) | 72k | -8.05 | **0/20** | 0.077m | 4.24 / 12.6 deg |
+    | `bc11` (z aux) | 96k | -8.61 | 1/20 | 0.068m | 4.46 / 18.5 deg |
+    | `bc12` (z+yaw aux) | 96k | -8.21 | **0/20** | 0.064m | 4.42 / 10.2 deg |
+
+    **None of the four new combinations beat the three established checkpoints on the metric
+    that actually matters (successful lift attempts) -- every one of them is flat-out worse
+    than `bc06`, `bc07`, AND `bc08` on positive-`rise` count, three of the four scoring ZERO.**
+    The yaw-aux-alone result (`bc09`) is the most striking: it made the thing it was trained to
+    fix WORSE, not better (mean yaw error 11.2 deg / max 43.0 deg, both roughly double `bc06`'s
+    untouched baseline) -- visual confirmation in `media/bc09_worst_yaw.gif` (seed 5, 43 deg
+    off). The combined variants (`bc10`, `bc12`) DID genuinely improve max yaw error (12.6 deg
+    and 10.2 deg, both clearly better than every other checkpoint's 18-27 deg range, approaching
+    the expert's own 5.7 deg) -- but at the cost of z-offset getting WORSE than any prior
+    checkpoint (0.077m, 0.064m) and positive-rise collapsing to 0/20 in both cases. Using `bc07`'s
+    96k DAgger data instead of `bc06`'s 72k (`bc11` vs `bc08`, same `z`-only recipe) didn't help
+    either -- z-offset got worse (0.068m vs 0.056m) and positive-rise cratered (1/20 vs 4/20).
+
+    **Honest read: stacking auxiliary losses on this small shared CNN+MLP trunk looks like
+    multi-task interference, not synergy.** Each additional auxiliary head competes for the same
+    limited shared representation and gradient budget; the combined variants' real (if partial)
+    gains on yaw precision came paired with a worse grip on the thing that has to happen FIRST
+    for any of this to matter -- actually completing a confident descend-close-lift attempt at
+    all. This matches a pattern across every auxiliary-loss experiment so far (bc08, bc09, bc10,
+    bc11, bc12): the network can learn to satisfy an auxiliary objective in isolation, but that
+    doesn't reliably compose with, or even avoid actively hurting, the main behavior once
+    multiple objectives share this particular trunk.
+
+    **Not yet discussed with the user**: of everything tried across items 18-23, the three
+    established checkpoints without any auxiliary loss (`bc06`, `bc07`, `bc08`) remain the best
+    results in the project by the primary metric (positive-rise count: 10, 7, 4 respectively) --
+    the auxiliary-loss direction, at least with this network's current capacity and this dataset
+    size, has not produced a net improvement in any of the five variants tried. A larger shared
+    trunk (more capacity to accommodate multiple objectives without competing) or decoupled
+    per-task feature branches (auxiliary heads reading their own small sub-network off a shared
+    early layer, rather than the same final actor latent) would be the natural next things to
+    try if this direction is still worth pursuing -- otherwise, `bc07`'s plain DAgger-round-4
+    recipe, iterated further, remains the strongest lever demonstrated in the project so far.
+
 ## Repository layout
 
 ```
@@ -977,8 +1034,9 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01-bc08.gif, bc02-08_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
-│       grasp_height_comparison.png, yaw_alignment_comparison.png
+│   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc05_chunked.gif,
+│       bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
+│       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
