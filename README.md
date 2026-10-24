@@ -1168,6 +1168,58 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     separated out from alignment) is the natural next lever if more is wanted, since alignment
     itself is now solved to within expert precision.
 
+26. **Hold-phase-weighted BC loss (`bc18`), user: "tackle lift-phase lateral drift as the new
+    bottleneck" -- a negative result, and informative about the drift itself.** First re-traced
+    the per-step drift mechanism directly (grip/object xy every 5 steps from the close moment,
+    same method as item 15) on `bc17`'s near-misses, since item 25 only established THAT
+    alignment and drift had decoupled, not whether drift's shape had changed. **Finding: it's no
+    longer a single uniform bias.** Some trials now partially self-correct mid-hold-phase (e.g.
+    `bc15` seed 6's success: drift peaks at 0.0225m around step 50, recovers to 0.0122m by
+    episode end), while others still accumulate purely monotonically all the way to episode end
+    exactly as item 15 first described (`bc17` seed 8: drift grows from 0 to 0.092m with no
+    recovery at all). Proprio already includes joint velocity, and hold-phase steps are already
+    ~75% of every episode under the existing uniform-weighted loss -- so this doesn't look like
+    missing information, more like insufficient training *emphasis* on nailing the per-step bias
+    specifically where it compounds.
+
+    **Fix tried: reweight the SAME single action-MSE loss (`train_bc_holdweight.py`) so
+    post-close-moment transitions count `--hold-weight` times as much, renormalized to keep the
+    dataset-wide mean weight at 1.0** -- no second objective, no new head, deliberately avoiding
+    the multi-task interference items 21-23 found when stacking auxiliary losses on this trunk.
+    Hold-phase detection reuses the project's standard has_opened/close_start convention.
+    Smoke-tested on a 20-episode slice before the full run. Trained on `bc17`'s own 216k dataset
+    (`demos_dagger10.npz`) with `--hold-weight 4.0`, isolating the reweighting as the only
+    variable against `bc17`'s plain-uniform baseline on the identical data.
+
+    **Result: worse on every single metric, not just unchanged.** Mean reward -5.93 (vs `bc17`'s
+    -5.26), 16/20 positive-rise (vs 18/20), z-offset 0.016m (vs 0.0045m, **3.6x worse**), yaw
+    align err 4.69/22.47deg (vs 1.89/8.92deg, both roughly 2-3x worse) -- success held flat at
+    1/20 either way, so the targeted problem wasn't fixed and the already-solved alignment
+    problem got notably worse.
+
+    <p align="center">
+      <img src="media/bc18_holdweight.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc18</code>, seed 13 -- same trial `bc17` nearly succeeded on; hold-weighting didn't fix the drift and alignment regressed.</sub></p>
+
+    **Honest read: upweighting hold-phase steps effectively downweights the close-moment steps,
+    which is exactly where the alignment precision item 25 called "essentially solved" was
+    earned.** Reweighting one single loss still creates the same kind of tradeoff multi-task
+    stacking did -- not between two separate objectives this time, but between two different
+    REGIONS of the same episode competing for this network's limited capacity. The underlying
+    premise (drift is under-emphasized in training) may still be right, but a blanket 4x
+    multiplier on 75% of every episode's steps was too blunt an instrument -- it reweighted away
+    from the alignment-critical region as a side effect, not toward some precisely-targeted
+    drift-recovery subset.
+
+    **Not yet discussed with the user**: a milder weight (e.g. 1.5-2x) or restricting the
+    upweighting to specifically the FIRST ~20-30 steps after close (where the bias is introduced,
+    rather than the whole ~90-step hold phase, which also includes the already-well-learned
+    steady lift/settle portion) would more precisely target what item 15/25's trace actually
+    showed mattered, without taxing the close-moment steps at all. Absent that refinement,
+    `bc15` remains the project's best checkpoint, and this specific recipe (blanket hold-phase
+    reweighting) is a demonstrated dead end, not an open question.
+
 ## Repository layout
 
 ```
@@ -1188,7 +1240,8 @@ panda_vision_grasp/
 ├── collect_demos.py                  # Stage 5: BC dataset from the scripted controller
 ├── collect_dagger.py                 # Stage 5: DAgger correction pass on a trained BC policy
 ├── train_bc.py                       # Stage 5: behavior-cloning pretrain on PPO's own network
-├── train_bc_auxz.py                  # Stage 5: BC + auxiliary FK-derived z-error loss
+├── train_bc_auxz.py                  # Stage 5: BC + auxiliary FK-derived z-error/yaw-error loss
+├── train_bc_holdweight.py            # Stage 5: BC with hold-phase-reweighted action MSE
 ├── train_bc_chunked.py               # Stage 5: standalone action-chunking BC (not SB3-based)
 ├── eval_policy_chunked.py            # Stage 5: 20-trial eval for a chunked-BC checkpoint
 ├── demo_chunked.py                   # Stage 5: renders a chunked-BC policy's rollout
@@ -1201,8 +1254,8 @@ panda_vision_grasp/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
-│       bc15_best.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
-│       grasp_height_comparison.png, yaw_alignment_comparison.png
+│       bc15_best.gif, bc18_holdweight.gif, bc05_chunked.gif, bc06_chunked.gif,
+│       grasp01-08.gif, grasp_height_comparison.png, yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
