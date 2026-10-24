@@ -1220,6 +1220,48 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     `bc15` remains the project's best checkpoint, and this specific recipe (blanket hold-phase
     reweighting) is a demonstrated dead end, not an open question.
 
+27. **Milder hold-weights (`bc19` at 1.5x, `bc20` at 2.0x), user: "try the milder weight,
+    1.5-2x" -- a genuine win, and a clean dose-response curve, not a lucky single point.** Same
+    `train_bc_holdweight.py` recipe and `bc17` 216k dataset as item 26's `bc18`, only
+    `--hold-weight` changed:
+
+    | Run | `hold-weight` | Mean reward | Positive rise | Success | z-offset | yaw align (mean/max) | mean\|action\| |
+    |---|---|---|---|---|---|---|---|
+    | `bc17` (uniform, 1.0x) | -- | -5.26 | 18/20 | 1/20 | 0.0045m | 1.89 / 8.9 deg | 0.0386 |
+    | `bc19` (1.5x) | 1.5 | **-1.66** | 16/20 | **4/20** | **0.0033m** | 2.65 / 14.6 deg | 0.0327 |
+    | `bc20` (2.0x) | 2.0 | -3.73 | 16/20 | 2/20 | 0.0058m | 3.78 / 24.8 deg | 0.0338 |
+    | `bc18` (4.0x) | 4.0 | -5.93 | 16/20 | 1/20 | 0.016m | 4.69 / 22.5 deg | 0.0364 |
+
+    <p align="center">
+      <img src="media/bc19.gif" width="280"> <img src="media/bc19_best_case.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc19</code> (1.5x), seed 0 (left) and seed 12, best case (right, <code>rise=0.1562m drift=0.0143m</code>) -- the project's new best z-offset.</sub></p>
+
+    **`bc19` matches `bc15`'s best-ever success count (4/20) while posting the best z-offset
+    (0.0033m) and lowest action noise (0.0327) in the entire project** -- the first modification
+    attempted since the plain-DAgger arc (items 18-25) that doesn't trade success rate away for
+    precision or vice versa. Mean reward (-1.66) is a clear jump over `bc17`'s uniform-weighted
+    baseline (-5.26), though still short of `bc15`'s -0.77. The 4 checkpoints above form a clean
+    inverted-U: reward and success both degrade monotonically as `--hold-weight` increases past
+    1.5x (reward -1.66 -> -3.73 -> -5.93; success 4/20 -> 2/20 -> 1/20), while z-offset and yaw
+    error both get steadily WORSE in the same direction (0.0033m -> 0.0058m -> 0.016m; 2.65deg
+    -> 3.78deg -> 4.69deg mean) -- confirming item 26's mechanism directly: more weight keeps
+    taxing the close-moment alignment steps more, for no further drift benefit past a small
+    multiplier. `bc20`'s 2.0x sits in between on every metric, exactly where the dose-response
+    predicts, not as an outlier.
+
+    <p align="center">
+      <img src="media/bc20.gif" width="280"> <img src="media/bc20_best_case.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc20</code> (2.0x), seed 0 (left) and seed 13, best case (right, <code>rise=0.1821m drift=0.0375m</code>).</sub></p>
+
+    **Not yet discussed with the user**: `bc19`'s combination (best alignment in the project,
+    tied-best success rate, achieved via one hyperparameter change on already-collected data
+    rather than a new DAgger round) makes it a strong candidate to run a 10th DAgger round ON
+    TOP OF, the same way item 24 iterated `bc07` -- rolling out `bc19`'s own policy might expose
+    a cleaner remaining drift signal than `bc17`'s did, now that both alignment AND the
+    close-moment region are being trained well simultaneously. Untested so far.
+
 ## Repository layout
 
 ```
@@ -1254,8 +1296,9 @@ panda_vision_grasp/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
-│       bc15_best.gif, bc18_holdweight.gif, bc05_chunked.gif, bc06_chunked.gif,
-│       grasp01-08.gif, grasp_height_comparison.png, yaw_alignment_comparison.png
+│       bc15_best.gif, bc18_holdweight.gif, bc19-20.gif, bc19-20_best_case.gif,
+│       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
+│       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
