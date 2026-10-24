@@ -390,6 +390,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc06` (note: unrelated to `bc06_chunked` above) | DAgger round 3 -- NOTE run-name collision in naming only, not data: `bc06` is the 2nd per-step DAgger iteration (on `bc04`'s own rollouts, same `CORRECTION_CAP=0.15`), merged CUMULATIVELY with all prior rounds (`demos_dagger3.npz` 48k + `dagger04.npz` 24k = 72k total, proper DAgger convention of keeping every round, not just the latest) | 0/20, but the best result in the whole project: mean reward -7.99 (best yet), mean `rise` 0.0253 (11x `bc04`'s), 7/20 trials with positive `rise`, 3/20 trials EXCEEDING the 0.09m rise threshold outright, 14/20 under the 0.04m drift threshold. Best trial (seed 12) crosses the rise threshold comfortably by step 85 and reaches `rise=0.1158m` by episode end, failing ONLY on `drift=0.0515m` -- just 1.3x over the limit | Confirmed via trace: the SAME systematic one-directional drift bias as every prior round, continuing to shrink with each DAgger iteration (this round's worst-case drift is well below `bc04`'s). Action-noise diagnostic confirms the capped-correction discipline held through a 2nd cumulative round too (mean\|action\| 0.041, in line with `bc04`'s 0.038, nowhere near `bc02`'s uncapped 0.226). This is the first run where a single trial is close enough that one more DAgger round looks genuinely likely to cross the finish line |
    | `bc07` | DAgger round 4 (3rd per-step iteration, on `bc06`'s own rollouts, same `CORRECTION_CAP=0.15`), merged cumulatively with every prior round (`demos_dagger4.npz` 72k + `dagger05.npz` 24k = 96k total) -- launched directly off the user's visual observation that `bc06`'s gallery GIFs show the gripper closing near the TOP tip of the cube rather than centered, prompting a quantitative check (see below) before this round even finished training | 0/20, mixed vs `bc06`: mean reward WORSE (-9.02 vs -7.99) and the best-rise trials now carry MORE drift (up to 0.098m vs `bc06`'s best 0.052m), but 10/20 trials now get positive `rise` (vs 7/20) and the action-noise diagnostic, while still far from `bc02`'s blown-up regime, ticked up again (mean\|action\| 0.052, vs `bc04`'s 0.038 and `bc06`'s 0.041 -- a 3-round upward trend worth watching) | **The real finding is a newly-quantified vertical grasp-height bug, not this round's net result.** Measured the vertical offset between the gripper site and the object's center at the moment the gripper finishes closing (stabilized, 15 steps after first closing below 75%): the scripted expert grasps almost perfectly centered (mean offset 0.0003m across 20 episodes) but `bc04` and `bc06` both grasp ~0.049m high -- most of the way from the cube's center (half-height 0.03m) past its top edge -- confirmed visually (`media/grasp_height_comparison.png`, expert vs `bc06` wrist-cam at the close moment). This bias is INVARIANT across two full cumulative DAgger rounds (`bc04`: 0.0488m, `bc06`: 0.0489m, same to 3 decimal places) -- it long predates `bc06` and was being completely masked by the drift-focused analysis, since many of its worst cases (offset >0.05m) simply never lift the object at all (`rise` stuck at the reset baseline), trivially producing near-zero `drift` and hiding the real cause as "no grasp" rather than "bad grasp." `bc07` is the first round to visibly move this number (0.033m, down ~1/3), which is why more trials now attempt a lift at all -- but the same correction signal that's fixing vertical placement is simultaneously getting noisier overall (the mean\|action\| creep above), which is the most likely explanation for the worse drift on this round's successful lifts. Since the expert itself is dead-center, this is purely a policy-learned bias, not a flawed label -- plausibly a depth/scale misjudgment from the camera views rather than a label-noise problem, which per-step DAgger's correction signal only partially addresses |
    | `bc08` | Auxiliary z-error loss (`train_bc_auxz.py`): a small head on the BC policy's shared actor features predicts the FK-derived vertical grasp-height offset (a scene constant, so no privileged per-episode labels needed), trained jointly with the usual action MSE -- same `bc06` 72k dataset, no new DAgger data, to isolate this one change. First motivated by a depth-parallax probe (below) confirming `wrist_cam`'s apparent object size is a strong, monotonic depth cue (361px at correct height down to 28-75px at 3-8cm too high) while `workspace_cam` carries ~none (flat ~1215px throughout) | 0/20, best mean reward in the project (-7.22, vs `bc06`'s -7.99) and the first round-over-round DROP in action noise (mean\|action\| 0.026, vs `bc06`'s 0.041/`bc07`'s 0.052) -- but the targeted bug did NOT improve: mean vertical offset 0.056m, slightly WORSE than `bc06`'s 0.049m, with fewer trials even attempting a lift (4/20 positive `rise` vs `bc06`'s 7/20) | Auxiliary MSE converged cleanly in training (1.0 -> 0.0034 normalized over 20 epochs) -- the shared trunk CAN represent this quantity precisely from the demo distribution -- but that representation didn't translate into better height-targeting behavior at rollout. A real auxiliary-task pitfall: the trunk can satisfy an auxiliary loss using features the action head's own downstream layers never end up relying on, especially across the open-loop-training / closed-loop-rollout distribution shift every BC method here faces. The best-mean-reward result looks like a side effect of a smoother, lower-magnitude policy from the extra regularizing pressure, not of fixing the specific bug it targeted |
+   | `bc13` | DAgger round 5 (4th per-step iteration, on `bc07`'s own rollouts, same `CORRECTION_CAP=0.15`, no auxiliary loss), merged cumulatively with every prior round (`demos_dagger5.npz` 96k + `dagger06.npz` 24k = 120k total) -- user: "go for the DAgger round 5" | **1/20 full success (seed 10) -- the first anywhere in this project's history.** Every metric improved at once: mean reward -5.03 (best yet, vs `bc07`'s -9.02), 14/20 positive-rise (vs `bc07`'s 10/20), z-offset 0.0195m (best yet, vs `bc07`'s 0.033m), yaw align err 4.01/18.07deg (best mean in the project), mean\|action\| 0.0295 (reversing the 3-round upward creep) | Confirms plain per-step DAgger, iterated a 5th time on the previous round's own rollouts, is the one lever in this project with real multi-round compounding evidence -- unlike every auxiliary-loss variant (items 21-23), which plateaued or regressed on the very first try. No sign yet that this lever has stopped working |
 
    **Every attempt's rollout, not just one representative GIF** -- each panel pair is
    `workspace_cam` (left) and `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md).
@@ -429,6 +430,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc08` (seed 17, highest-rise trial this round) | <img src="media/bc08_best_case.gif" width="280"> |
    | Yaw-alignment comparison: scripted expert (left, flush, align_err~1.7deg mean) vs `bc08` seed 4 (right, corner grab, align_err~20deg) -- item 22's root cause | <img src="media/yaw_alignment_comparison.png" width="560"> |
    | `bc09` (seed 5, yaw aux loss -- worst yaw error in the whole project, 43deg, item 23) | <img src="media/bc09_worst_yaw.gif" width="280"> |
+   | `bc13` (seed 10, DAgger round 5 -- the trial `eval_policy.py` scored as the project's first clean success; this render is a near-miss of the same trial, see item 24's non-determinism note) | <img src="media/bc13_success.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -1002,6 +1004,55 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     try if this direction is still worth pursuing -- otherwise, `bc07`'s plain DAgger-round-4
     recipe, iterated further, remains the strongest lever demonstrated in the project so far.
 
+24. **DAgger round 5 on `bc07` (`bc13`) -- user: "go for the DAgger round 5", after being asked
+    whether to iterate the proven plain-DAgger lever again or call the project done -- THE FIRST
+    SUCCESS IN THE PROJECT'S HISTORY.** Same recipe as every round since `bc04`: roll out
+    `bc07`'s own policy for 200 episodes (`collect_dagger.py --run-name bc07`, same
+    `CORRECTION_CAP=0.15`), relabel with fresh expert corrections from wherever the rollout
+    actually drifted to, merge CUMULATIVELY with every prior round (`demos_dagger5.npz` 96k +
+    `dagger06.npz` 24k = 120k total), retrain from scratch with the unmodified `train_bc.py` (no
+    auxiliary loss -- item 23 showed that direction doesn't compose with this trunk, so this
+    round goes back to the one lever with actual multi-round evidence of working).
+
+    **Result: 1/20 trials fully succeeded (seed 10: `rise=0.0903m`, `drift=0.0389m`,
+    `ep_reward=15.45`) -- the first `success=True` anywhere in this project's history, across
+    every architecture and every one of the 12 prior checkpoints.** Every other metric moved in
+    the same direction at once, not just the one lucky trial:
+
+    | Run | Data | Mean reward | Positive rise | Success | z-offset | yaw align err (mean/max) | mean\|action\| |
+    |---|---|---|---|---|---|---|---|
+    | `bc06` | 72k | -7.99 | 7/20 | 0/20 | 0.049m | 5.24 / 25.2 deg | 0.041 |
+    | `bc07` | 96k | -9.02 | 10/20 | 0/20 | 0.033m | 5.28 / 26.9 deg | 0.052 |
+    | `bc13` (DAgger r5) | 120k | **-5.03** | **14/20** | **1/20** | **0.0195m** | **4.01 / 18.07 deg** | **0.0295** |
+
+    z-offset continues the exact same monotonic trend across every DAgger round so far
+    (`bc04` 0.0488m -> `bc06` 0.0489m -> `bc07` 0.033m -> `bc13` 0.0195m -- now under 2cm, well
+    inside the object's own 3cm half-height). Yaw alignment improved too (4.01deg mean, the best
+    in the project, beating even the auxiliary-loss variants that specifically targeted it) even
+    though nothing in this round's recipe targets rotation directly -- consistent with yaw error
+    being partly a symptom of the same general per-step drift that DAgger's correction signal
+    addresses, not a fully independent axis. The 3-round upward creep in action noise flagged as
+    "worth watching" in item 19 (`bc04` 0.038 -> `bc06` 0.041 -> `bc07` 0.052) reversed this
+    round (0.0295, back below `bc04`'s level) -- more cumulative data and a narrower remaining
+    correction signal (since `bc07` itself drifts less than `bc06` did) apparently gives the
+    5th round less noisy material to learn from, where the first 3-4 rounds had progressively
+    noisier corrections to teach from.
+
+    Rendering seed 10's rollout for the gallery (`demo_stage5_rl_failure.py`) reproduced the
+    previously-documented non-determinism (`rise=0.0795m`, `drift=0.0441m`, just barely missing
+    both thresholds on this particular render) rather than the exact success recorded by
+    `eval_policy.py` -- rendering isn't bit-reproducible across runs (same root cause noted for
+    `bc08` seed 17 in item 21), so the GIF shown is a near-miss of the SAME trial that
+    `eval_policy.py`'s run scored as a clean success, not a cherry-picked different seed.
+
+    **Not yet discussed with the user**: the project's central goal (pixels-to-actions grasping
+    with no privileged state) has now been demonstrated at least once, but 1/20 is still a low
+    success rate -- a 6th DAgger round on `bc13`'s own rollouts is the obvious next step given
+    this round's evidence that the lever hasn't plateaued yet (every metric improved
+    simultaneously, no sign of the regression pattern that hit auxiliary losses). Whether to
+    keep iterating toward a higher success rate, or treat "at least one demonstrated success"
+    as sufficient to close out Stage 5 and write up the project, is an open call.
+
 ## Repository layout
 
 ```
@@ -1034,8 +1085,8 @@ panda_vision_grasp/
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
-│   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc05_chunked.gif,
-│       bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
+│   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
+│       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
 │       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
