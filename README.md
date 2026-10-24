@@ -1313,9 +1313,9 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     lower-magnitude phenomenon, not the main story.
 
     <p align="center">
-      <img src="media/bc15_latch.gif" width="280">
+      <img src="media/bc15_nolatch.gif" width="280"> <img src="media/bc15_latch.gif" width="280">
     </p>
-    <p align="center"><sub><code>bc15</code> seed 13 with <code>--gripper-latch-delay 5</code> -- same successful trial as the unmodified checkpoint (<code>rise=0.1527m drift=0.0322m</code> vs <code>0.1540m/0.0322m</code>), with the post-close command frozen instead of chattering.</sub></p>
+    <p align="center"><sub><code>bc15</code> seed 13, same trial, same rise/drift/success -- unmodified (left, <code>rise=0.1540m drift=0.0322m</code>, visible snap-then-wobble after contact) vs <code>--gripper-latch-delay 5</code> (right, <code>rise=0.1527m drift=0.0322m</code>, command frozen instead of chattering).</sub></p>
 
     **Not yet discussed with the user**: this is an inference-time patch, not a trained fix --
     cheap to apply to every future eval/demo (just add the flag), but it doesn't change what the
@@ -1359,7 +1359,7 @@ panda_vision_grasp/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
-│       bc15_best.gif, bc15_latch.gif, bc18_holdweight.gif, bc19-20.gif,
+│       bc15_best.gif, bc15_nolatch.gif, bc15_latch.gif, bc18_holdweight.gif, bc19-20.gif,
 │       bc19-20_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
 │       grasp_height_comparison.png,
 │       yaw_alignment_comparison.png
