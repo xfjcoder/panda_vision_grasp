@@ -31,11 +31,14 @@ def main():
     ap.add_argument("--dual-view", action="store_true",
                      help="Also render wrist_cam (eye-in-hand) side by side with workspace_cam. "
                           "Visualization only -- the policy never sees this view.")
-    ap.add_argument("--gripper-latch-delay", type=int, default=None,
+    ap.add_argument("--gripper-latch-delay", type=int, default=5,
                      help="Same post-hoc gripper-command hysteresis as eval_policy.py -- once "
                           "gripper_qpos confirms a close and this many more steps pass, freeze "
                           "the gripper command fully-closed for the rest of the episode. 5 is "
-                          "the sweet spot found by sweeping on bc15/bc19.")
+                          "the sweet spot found by sweeping on bc15/bc19. DEFAULT ON (5) as of "
+                          "item 28 -- pass a negative value (e.g. -1) to fully disable and "
+                          "reproduce the original unmodified rollout, needed when regenerating "
+                          "any GIF already documented in the README from before item 28.")
     args = ap.parse_args()
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
@@ -67,7 +70,7 @@ def main():
     for t in range(EPISODE_STEPS):
         obs_norm = norm_env.normalize_obs(obs)
         action, _ = policy.predict(obs_norm, deterministic=True)
-        if args.gripper_latch_delay is not None:
+        if args.gripper_latch_delay >= 0:
             g = obs["proprio"][-1]
             if g > 0.9:
                 has_opened = True

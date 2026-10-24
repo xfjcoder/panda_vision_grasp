@@ -1317,13 +1317,15 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     </p>
     <p align="center"><sub><code>bc15</code> seed 13, same trial, same rise/drift/success -- unmodified (left, <code>rise=0.1540m drift=0.0322m</code>, visible snap-then-wobble after contact) vs <code>--gripper-latch-delay 5</code> (right, <code>rise=0.1527m drift=0.0322m</code>, command frozen instead of chattering).</sub></p>
 
-    **Not yet discussed with the user**: this is an inference-time patch, not a trained fix --
-    cheap to apply to every future eval/demo (just add the flag), but it doesn't change what the
-    network itself learned. Worth considering whether to make `--gripper-latch-delay 5` the
-    default going forward for every future eval/GIF in this project (consistent presentation,
-    small free win) now that it's validated on two separate checkpoints, or keep it strictly
-    opt-in since it never fixes the underlying noisy-gripper-regression root cause, only masks
-    it post-hoc.
+    **Decided, user: "make it the default for future evals and gifs" -- `--gripper-latch-delay`
+    now defaults to `5` in both `eval_policy.py` and `demo_stage5_rl_failure.py`.** Pass a
+    negative value (e.g. `-1`) to get the original unmodified rollout back, needed only when
+    reproducing a specific number already documented in this README from before this item --
+    every number and GIF in items 1-27 above was produced WITHOUT the latch (it didn't exist
+    yet), so they're not retroactively changed by this default flip; every eval/GIF from this
+    point forward includes it unless explicitly disabled. This is still an inference-time patch,
+    not a trained fix for the underlying noisy-gripper-regression root cause -- it masks the
+    symptom cheaply and reliably, it doesn't teach the network to stop producing it.
 
 ## Repository layout
 

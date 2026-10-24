@@ -20,7 +20,7 @@ def main():
     ap.add_argument("--run-name", type=str, required=True)
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--base-seed", type=int, default=0)
-    ap.add_argument("--gripper-latch-delay", type=int, default=None,
+    ap.add_argument("--gripper-latch-delay", type=int, default=5,
                      help="Once proprio's gripper_qpos confirms a close (crosses below 0.75 "
                           "after having been open) and this many MORE steps have passed, "
                           "override the policy's own gripper command to fully-closed for the "
@@ -32,8 +32,10 @@ def main():
                           "the smooth demos it was trained on. Delay matters a lot -- 0 (latch "
                           "immediately) actively hurts (cuts off what looks like a brief, "
                           "useful self-adjusting squeeze), 5 is the sweet spot found by sweeping "
-                          "{0,5,10,15,20,30} on bc19, 15+ also hurts. Omit this flag (None) for "
-                          "the original unmodified behavior.")
+                          "{0,5,10,15,20,30} on bc15/bc19, 15+ also hurts. DEFAULT ON (5) as of "
+                          "item 28 -- pass a negative value (e.g. -1) to fully disable and "
+                          "reproduce the original unmodified behavior, needed when comparing "
+                          "against any pre-item-28 numbers in the README.")
     args = ap.parse_args()
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
@@ -55,7 +57,7 @@ def main():
         for t in range(EPISODE_STEPS):
             obs_norm = norm_env.normalize_obs(obs)
             action, _ = policy.predict(obs_norm, deterministic=True)
-            if args.gripper_latch_delay is not None:
+            if args.gripper_latch_delay >= 0:
                 g = obs["proprio"][-1]
                 if g > 0.9:
                     has_opened = True
