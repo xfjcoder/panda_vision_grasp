@@ -65,8 +65,13 @@ def main():
 
     if args.record:
         Path(args.record).parent.mkdir(parents=True, exist_ok=True)
-        imgs = [Image.fromarray(f) for f in frames]
-        imgs[0].save(args.record, save_all=True, append_images=imgs[1:], duration=50, loop=0)
+        # GitHub's README renderer won't animate (or sometimes won't even display) GIFs above
+        # ~10MB -- half-resolution + an optimized palette keeps every rendered GIF well under
+        # that regardless of episode length or dual-view width (see demo_stage5_rl_failure.py).
+        half_res = [f[::2, ::2] for f in frames]
+        imgs = [Image.fromarray(f) for f in half_res]
+        imgs[0].save(args.record, save_all=True, append_images=imgs[1:], duration=50, loop=0,
+                     optimize=True)
         print(f"Saved {len(frames)} frames to {args.record}")
 
     workspace_renderer.close()
