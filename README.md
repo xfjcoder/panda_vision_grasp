@@ -431,6 +431,7 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | Yaw-alignment comparison: scripted expert (left, flush, align_err~1.7deg mean) vs `bc08` seed 4 (right, corner grab, align_err~20deg) -- item 22's root cause | <img src="media/yaw_alignment_comparison.png" width="560"> |
    | `bc09` (seed 5, yaw aux loss -- worst yaw error in the whole project, 43deg, item 23) | <img src="media/bc09_worst_yaw.gif" width="280"> |
    | `bc13` (seed 10, DAgger round 5 -- the trial `eval_policy.py` scored as the project's first clean success; this render is a near-miss of the same trial, see item 24's non-determinism note) | <img src="media/bc13_success.gif" width="280"> |
+   | `bc15` (seed 6, DAgger round 7 -- the project's best checkpoint overall, item 25; clean success, both `rise` and `drift` comfortably past threshold) | <img src="media/bc15_best.gif" width="280"> |
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -1053,6 +1054,54 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     keep iterating toward a higher success rate, or treat "at least one demonstrated success"
     as sufficient to close out Stage 5 and write up the project, is an open call.
 
+25. **DAgger rounds 6-9, chained back to back, user: "keep doing the plain-DAgger lever till the
+    plateau" -- found it.** Ran four more cumulative rounds automatically (`bc14`: 144k,
+    `bc15`: 168k, `bc16`: 192k, `bc17`: 216k transitions -- each round rolling out the previous
+    checkpoint's own policy, same `CORRECTION_CAP=0.15`, same unmodified `train_bc.py`, no
+    auxiliary loss), evaluating and running the z-offset/yaw diagnostics after every single one
+    so the plateau would be visible the moment it happened, not just at the end:
+
+    | Run | Round | Mean reward | Positive rise | Success | z-offset | yaw align (mean/max) | mean\|action\| |
+    |---|---|---|---|---|---|---|---|
+    | `bc13` | 5 | -5.03 | 14/20 | 1/20 | 0.0195m | 4.01 / 18.1 deg | 0.0295 |
+    | `bc14` | 6 | -5.57 | 14/20 | 1/20 | 0.0158m | 3.91 / 12.9 deg | 0.0370 |
+    | `bc15` | 7 | **-0.77** | 18/20 | **4/20** | 0.0069m | 4.37 / 18.1 deg | 0.0308 |
+    | `bc16` | 8 | -2.11 | **19/20** | 3/20 | 0.0057m | 1.84 / 5.8 deg | 0.0323 |
+    | `bc17` | 9 | -5.26 | 18/20 | 1/20 | **0.0045m** | 1.89 / 8.9 deg | 0.0386 |
+
+    **The plateau is real, and it's instructive about WHAT plateaued.** Alignment precision
+    (z-offset, yaw) kept improving monotonically through every single round, all the way to
+    `bc17` -- z-offset fell from 0.0195m to 0.0045m (a 4x drop over 4 rounds, continuing the
+    exact trend from items 19/24) and yaw error reached 1.84-1.89deg mean by `bc16`/`bc17`,
+    essentially matching the scripted expert's own 1.7deg. If alignment precision were the
+    whole story, `bc17` should be the project's best checkpoint. It isn't: success count and
+    mean reward peaked at `bc15` (4/20, -0.77) and `bc16` (3/20, -2.11), then both fell back at
+    `bc17` (1/20, -5.26) despite `bc17` having the BEST alignment numbers in the whole table.
+    Inspecting `bc16`'s and `bc17`'s eval logs directly confirms why: both have several trials
+    with `rise` comfortably past the 0.09m success threshold (some well past 0.15m) that fail
+    `success` ONLY on `drift` landing just over the 0.04m limit (e.g. `bc17` seed 8:
+    `rise=0.1613m drift=0.0686m`; seed 10: `rise=0.1518m drift=0.0822m`) -- the alignment
+    problem this whole DAgger arc has been grinding down since item 19 is now essentially
+    solved, and the binding constraint has shifted to lift-phase LATERAL drift specifically,
+    the same axis flagged as a distinct, separate shortfall as far back as item 15 (`bc04`) and
+    never directly targeted by any DAgger round since (every round's correction signal mixes
+    alignment and drift fixes together, and alignment apparently had a steeper, faster-learned
+    gradient).
+
+    **`bc15` is the project's best checkpoint overall** (highest reward, highest success count,
+    second-best everything else) -- rendered its best trial (seed 6: `rise=0.1473m`,
+    `drift=0.0141m`, `success=True`) for the gallery, confirming the render/eval
+    non-determinism noted for `bc13` goes both ways: this one reproduced cleanly as a success,
+    unlike `bc13`'s near-miss render.
+
+    **Not yet discussed with the user**: a 10th round on top of `bc17` was NOT run, since two
+    consecutive rounds (`bc16` then `bc17`) both declined on the metric that matters
+    (success/reward) while alignment metrics kept improving -- exactly the plateau signature
+    asked for. Continuing the identical recipe further looks unlikely to reverse this on its
+    own; a fix aimed specifically at lift-phase lateral drift (the same gap items 15/19 first
+    separated out from alignment) is the natural next lever if more is wanted, since alignment
+    itself is now solved to within expert precision.
+
 ## Repository layout
 
 ```
@@ -1086,8 +1135,8 @@ panda_vision_grasp/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
-│       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
-│       yaw_alignment_comparison.png
+│       bc15_best.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
+│       grasp_height_comparison.png, yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
