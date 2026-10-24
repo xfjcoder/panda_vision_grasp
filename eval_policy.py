@@ -75,8 +75,12 @@ def main():
               f"ep_reward={ep_reward:.2f} success={info['success']}")
 
     n_success = sum(r["success"] for r in results)
+    mean_reward = float(np.mean([r["ep_reward"] for r in results]))
+    mean_rise = float(np.mean([r["rise"] for r in results]))
     print(f"\nSummary over {args.trials} trials: {n_success}/{args.trials} succeeded "
           f"(scripted privileged-state baseline: 20/20)")
+    print(f"SUMMARY_PARSEABLE run={args.run_name} trials={args.trials} success={n_success} "
+          f"mean_reward={mean_reward:.4f} mean_rise={mean_rise:.4f}")
     env.close()
 
 

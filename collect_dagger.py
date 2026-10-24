@@ -42,7 +42,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from collect_demos import build_scripted_targets, gripper_to_action
-from grasp_env import EPISODE_STEPS, GraspPixelEnv, MAX_JOINT_RATE
+from grasp_env import EPISODE_STEPS, GraspPixelEnv, MAX_JOINT_RATE, N_ARM
 
 CORRECTION_CAP = 0.15  # ~5x bc01's mean|action| of 0.031 -- enough to correct meaningfully
                         # faster than smooth demo motion, far short of a full-rate snap
@@ -54,6 +54,13 @@ def main():
                      help="Existing run (e.g. bc03) whose policy drives the rollout")
     ap.add_argument("--episodes", type=int, default=200)
     ap.add_argument("--out", type=str, default="data/dagger01.npz")
+    ap.add_argument("--gripper-latch-delay", type=int, default=5,
+                     help="Apply the same post-hoc gripper-command latch as eval_policy.py "
+                          "(README item 28) to the LEARNER action that drives which states get "
+                          "visited -- does not touch the recorded label, which is always the "
+                          "expert's own correct gripper command already. Keeps the visited-state "
+                          "distribution consistent with how this checkpoint is actually run at "
+                          "eval time. Pass a negative value to disable.")
     args = ap.parse_args()
 
     run_dir = f"runs/{args.run_name}"
@@ -75,6 +82,8 @@ def main():
 
         actual_q_target = q_pregrasp.copy()
         info = {}
+        has_opened = False
+        close_start = None
         for t in range(min(len(ideal_targets), EPISODE_STEPS)):
             ideal_q, ideal_g = ideal_targets[t]
             delta = np.clip((ideal_q - actual_q_target) / MAX_JOINT_RATE,
@@ -89,6 +98,14 @@ def main():
             obs_norm = norm_env.normalize_obs(obs)
             learner_action, _ = policy.predict(obs_norm, deterministic=True)
             learner_action = np.clip(learner_action, -1.0, 1.0)
+            if args.gripper_latch_delay >= 0:
+                g = obs["proprio"][-1]
+                if g > 0.9:
+                    has_opened = True
+                if has_opened and close_start is None and g < 0.75:
+                    close_start = t
+                if close_start is not None and t >= close_start + args.gripper_latch_delay:
+                    learner_action[N_ARM] = -1.0
             obs, reward, terminated, truncated, info = env.step(learner_action)
             actual_q_target = env.q_target.copy()
             if terminated or truncated:

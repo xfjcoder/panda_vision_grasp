@@ -1327,6 +1327,94 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     not a trained fix for the underlying noisy-gripper-regression root cause -- it masks the
     symptom cheaply and reliably, it doesn't teach the network to stop producing it.
 
+29. **"Approach BC more systematically, we've been missing something critical" -- user request.
+    Audited the whole BC arc (`bc01`-`bc20`) for what had genuinely never been varied, rather
+    than guessing.** Found three real gaps, all present in every single one of 20+ checkpoints:
+    (a) the policy's actual decision-making MLP -- downstream of both camera CNNs, concatenating
+    to a 527-dim vector -- has always been PPO's RL-sized default,
+    `Linear(527->64)->Tanh->Linear(64->64)->Tanh->Linear(64->8)`, never enlarged; (b) `epochs`,
+    `lr`, `batch_size` have been the same defaults since `bc01`, never swept; (c) there has
+    never been a train/val split anywhere -- every run's only signal was its own training loss,
+    which can't distinguish fitting from memorizing. Built `train_bc2.py` to test (a) and add
+    visibility into (c): `--net-arch` exposes the MLP size via `policy_kwargs`, and a random
+    EPISODE-level (not transition-level, to avoid leaking correlated adjacent frames) val split
+    reports held-out MSE every epoch.
+
+    **Capacity test: `bc21` (net_arch=64,64, exact reproduction check) vs `bc22`
+    (net_arch=256,256), same `bc19`-style recipe (hold-weight 1.5, `bc17`'s 216k data) --
+    bigger capacity made things WORSE, not better, cleanly contradicting the hypothesis every
+    multi-task interference finding (items 23, 26) had pointed at.** `bc21` reproduced `bc19`'s
+    ballpark exactly (11/40 success, confirming the new pipeline is correct); `bc22` collapsed
+    to 2/40 despite an almost IDENTICAL validation-loss curve to `bc21`'s -- the aggregate
+    held-out MSE barely moved between architectures, but real rollout success cratered. A
+    larger shared trunk was the single most-cited "untested next step" across items 23-27; it
+    isn't the answer.
+
+    **Overfitting WAS real and large (every checkpoint's val loss bottoms out around epoch 1-2
+    then climbs 30-40% by epoch 19, invisible until this session since nothing tracked it) --
+    but "fixing" it with early stopping backfired even harder than the capacity change.**
+    `bc23` (net_arch=64,64, checkpoint taken at its own best-val epoch 1) scored **0/40** --
+    most trials show `rise=-0.0003m drift=0.0000m`, meaning the policy barely moves from reset
+    at all. `bc24` (net_arch=256,256, same early-stop logic) scored 1/40. Both far worse than
+    their full-20-epoch counterparts (`bc21`: 11/40, `bc22`: 2/40).
+
+    <p align="center">
+      <img src="media/bc22_capacity.gif" width="280"> <img src="media/bc23_earlystop.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc22</code> (256,256 network, left) and <code>bc23</code> (64,64, stopped at its own best-val epoch, right) -- both worse than the untouched 64,64/20-epoch default, for different reasons.</sub></p>
+
+    **Why: aggregate held-out MSE is a misleading proxy for THIS task's success, not a
+    generically-wrong idea.** Most transitions in any episode are the easy, low-variance
+    majority (steady holding, slow approach) -- the network fits those almost immediately,
+    which is why val MSE bottoms out by epoch 1-2. What actually determines rollout success is
+    a small minority of high-variance, state-dependent CORRECTIVE transitions (exactly the
+    hold-phase drift-recovery behavior items 15/25/26 have been chasing) -- fitting those
+    further necessarily looks like "overfitting" to an aggregate metric dominated by the easy
+    majority, even though it's exactly the competence the task needs. This retroactively
+    explains why hold-phase reweighting (items 26/27) was a genuine win: it was already
+    counteracting this same imbalance by WEIGHT, the same thing more epochs does by TIME.
+    Added `--early-stop` to `train_bc2.py` as an opt-in diagnostic flag (default off) --
+    the train/val curve itself is still worth printing and watching for gross problems (NaN
+    loss, a curve that never improves at all), just not as the deployed-checkpoint criterion
+    here. **Conclusion: keep the original `net_arch=64,64` and full-epoch training -- both
+    already-tested "improvements" were real regressions, not missing pieces.**
+
+30. **Built the actual "iteratively and recursively improving" systematic loop the user asked
+    for (`dagger_loop.py`), replacing the by-hand round-by-round process items 18-27 all used.**
+    Automates: roll out the champion -> collect fresh expert corrections -> merge cumulatively
+    -> retrain with the validated recipe (`net_arch=64,64`, `hold_weight=1.5`, no early
+    stopping) -> evaluate champion AND candidate under the IDENTICAL condition (same trial
+    count, same gripper-latch default) -> promote only if the candidate's success count is
+    strictly higher, or tied with a better mean reward -- otherwise stop and report the
+    plateau, rather than silently carrying a worse checkpoint forward. Also added the same
+    gripper-latch rollout behavior to `collect_dagger.py` (affects which states get visited
+    during collection, not the recorded expert labels, which were always correct already) so
+    the whole pipeline is consistent end to end.
+
+    **Caught and fixed a real bug on the very first live run**: `dagger_loop.py`'s first round
+    produced `bc25` at 0/40 -- alarming, until checking its training log showed `train_bc2.py`'s
+    early-stopping (just proven harmful in item 29) was STILL unconditionally active, because
+    the loop was built and used in the same session right after disabling it only by not
+    re-reading my own just-added code path. Fixed (`--early-stop` now genuinely defaults off),
+    deleted the bad run's data/checkpoint, and reran round 1 cleanly.
+
+    **Round 1, properly run: `bc25` (240k transitions, one more cumulative DAgger round on
+    `bc21`) scored 10/40 vs champion `bc21`'s 11/40 -- a statistical tie within this project's
+    known noise band, correctly NOT promoted.** The loop did exactly what it was built to do:
+    ran a full real round end-to-end and stopped rather than continue from a checkpoint that
+    didn't demonstrate a clear improvement.
+
+    <p align="center">
+      <img src="media/bc25_loop_round1.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc25</code>, the loop's first real candidate -- a near-tie with champion <code>bc21</code>, correctly left unpromoted.</sub></p>
+
+    **Not yet discussed with the user**: `bc21` remains the champion. The infrastructure
+    (`train_bc2.py`, `dagger_loop.py`) is validated and ready to keep running -- more rounds,
+    a different starting champion, or a larger `--eval-trials` to cut through the noise this
+    round's near-tie sat inside of are all live options now that the systematic mechanism
+    itself works, rather than needing a human to hand-drive every step.
+
 ## Repository layout
 
 ```
@@ -1345,10 +1433,12 @@ panda_vision_grasp/
 ├── train.py                          # Stage 4: PPO training, see README's RL section
 ├── eval_policy.py                    # Stage 4: 20-trial held-out eval; --gripper-latch-delay for item 28's fix
 ├── collect_demos.py                  # Stage 5: BC dataset from the scripted controller
-├── collect_dagger.py                 # Stage 5: DAgger correction pass on a trained BC policy
+├── collect_dagger.py                 # Stage 5: DAgger correction pass; --gripper-latch-delay for item 30
 ├── train_bc.py                       # Stage 5: behavior-cloning pretrain on PPO's own network
 ├── train_bc_auxz.py                  # Stage 5: BC + auxiliary FK-derived z-error/yaw-error loss
 ├── train_bc_holdweight.py            # Stage 5: BC with hold-phase-reweighted action MSE
+├── train_bc2.py                      # Stage 5: BC v2 -- net-arch/hyperparam control, train/val split, item 29
+├── dagger_loop.py                    # Stage 5: automated iterative DAgger loop, item 30
 ├── train_bc_chunked.py               # Stage 5: standalone action-chunking BC (not SB3-based)
 ├── eval_policy_chunked.py            # Stage 5: 20-trial eval for a chunked-BC checkpoint
 ├── demo_chunked.py                   # Stage 5: renders a chunked-BC policy's rollout
@@ -1362,8 +1452,8 @@ panda_vision_grasp/
 │   ├── stage2_reach_grasp.gif
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
 │       bc15_best.gif, bc15_nolatch.gif, bc15_latch.gif, bc18_holdweight.gif, bc19-20.gif,
-│       bc19-20_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
-│       grasp_height_comparison.png,
+│       bc19-20_best_case.gif, bc22_capacity.gif, bc23_earlystop.gif, bc25_loop_round1.gif,
+│       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
 │       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
