@@ -1262,6 +1262,69 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     a cleaner remaining drift signal than `bc17`'s did, now that both alignment AND the
     close-moment region are being trained well simultaneously. Untested so far.
 
+28. **Gripper-command latch, user: "recent .gif files show the gripping action too fast, can it
+    be more elegant?" -- confirmed a real, previously-unmeasured oscillation, and fixed it with
+    a free post-hoc inference-time patch (no retraining).** Every action-noise diagnostic in
+    this project so far (items 9-27) only ever measured the 7 ARM dims
+    (`action[:N_ARM]`) -- the gripper's own direct (not delta) command channel had never once
+    been examined on its own. Traced it directly: the scripted expert's gripper command is a
+    perfect constant (`GRIPPER_CLOSE=0`, unchanging for the entire close+hold+lift phase, per
+    `collect_demos.py`'s schedule) -- the learned policies' own commands, by contrast, flip
+    direction 7-13 times in just the 30 steps after closing starts (`bc17`: 6.9, `bc19`: 7.3,
+    `bc15`: 12.45, `bc13`: 12.6 sign flips/30 steps), and the resulting PHYSICAL grip briefly
+    re-opens by as much as 0.03-0.16 (normalized `gripper_qpos` units) before settling, vs the
+    expert's 0.0067 -- exactly the visible "snap-then-wobble" the user flagged, on a channel no
+    prior diagnostic in this project had looked at.
+
+    **First attempt -- a hard latch (freeze the command fully-closed the instant `gripper_qpos`
+    first crosses the close threshold) -- backfired badly on `bc19` (4/20 -> 1/20), not a wash.**
+    Traced why on the specific trials it broke (seeds 8/12/18, all `bc19` successes at baseline):
+    `rise` dropped by more than half in every one. The oscillation isn't pure noise -- it looks
+    like the policy using a brief squeeze/release/re-squeeze to settle the grip into a more
+    secure hold before committing to the lift, and latching on the very first contact locks in
+    whatever grip geometry existed at that first touch, which isn't always good enough yet.
+
+    **Swept the latch DELAY instead of latching immediately** (`{0,5,10,15,20,30}` steps after
+    the close threshold, on `bc19`): 0 hurts badly (1/20), 5 is a clear peak, 15+ hurts again --
+    confirmed on `bc15` too, same-shaped curve, peak at delay=5. A short settle window lets the
+    brief adaptive squeeze happen, then freezes the command before its own noise starts actively
+    working against the grip. Added `--gripper-latch-delay N` to `eval_policy.py` and
+    `demo_stage5_rl_failure.py` (opt-in flag, original behavior unchanged if omitted) --
+    overrides only `action[N_ARM]` using the policy's own `gripper_qpos` observation, nothing
+    privileged, no change to the trained network.
+
+    **Confirmed on a larger, less noise-prone 40-seed sample (the first 20-seed sweep's 7/20
+    looked great but partly regressed to the mean): a real, modest, consistently-positive
+    effect, not a fluke.**
+
+    | Run | Condition | Success (/40) | Mean reward | Sign flips/30 post-close steps | Overshoot |
+    |---|---|---|---|---|---|
+    | `bc15` | baseline | 7 | -1.62 | 12.20 | 0.0207 |
+    | `bc15` | `--gripper-latch-delay 5` | 9 | -0.66 | **2.30** | 0.0188 |
+    | `bc19` | baseline | 10 | -0.23 | 7.00 | 0.0184 |
+    | `bc19` | `--gripper-latch-delay 5` | 11 | **+0.07** | **1.90** | 0.0249 |
+
+    `bc19` with the latch reaches the first POSITIVE mean reward across a full eval set in this
+    project's history. Sign-flip count (the "elegance" metric the user's own observation was
+    about) drops 4-5x in both checkpoints -- the command chatter is essentially eliminated, not
+    just reduced. Physical overshoot is a smaller, separate effect (governed by actuator
+    dynamics after the command freezes, not by the command itself) and moves in different
+    directions per checkpoint (`bc15` improves, `bc19` slightly worsens) -- a secondary, much
+    lower-magnitude phenomenon, not the main story.
+
+    <p align="center">
+      <img src="media/bc15_latch.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc15</code> seed 13 with <code>--gripper-latch-delay 5</code> -- same successful trial as the unmodified checkpoint (<code>rise=0.1527m drift=0.0322m</code> vs <code>0.1540m/0.0322m</code>), with the post-close command frozen instead of chattering.</sub></p>
+
+    **Not yet discussed with the user**: this is an inference-time patch, not a trained fix --
+    cheap to apply to every future eval/demo (just add the flag), but it doesn't change what the
+    network itself learned. Worth considering whether to make `--gripper-latch-delay 5` the
+    default going forward for every future eval/GIF in this project (consistent presentation,
+    small free win) now that it's validated on two separate checkpoints, or keep it strictly
+    opt-in since it never fixes the underlying noisy-gripper-regression root cause, only masks
+    it post-hoc.
+
 ## Repository layout
 
 ```
@@ -1278,7 +1341,7 @@ panda_vision_grasp/
 ├── eval_stage2_reach_grasp.py        # Stage 2: 20-trial scripted reach/grasp/lift sanity check
 ├── grasp_env.py                      # Stage 3: pixels-to-actions Gym env, see writeup above
 ├── train.py                          # Stage 4: PPO training, see README's RL section
-├── eval_policy.py                    # Stage 4: 20-trial held-out eval for a trained policy
+├── eval_policy.py                    # Stage 4: 20-trial held-out eval; --gripper-latch-delay for item 28's fix
 ├── collect_demos.py                  # Stage 5: BC dataset from the scripted controller
 ├── collect_dagger.py                 # Stage 5: DAgger correction pass on a trained BC policy
 ├── train_bc.py                       # Stage 5: behavior-cloning pretrain on PPO's own network
@@ -1291,13 +1354,14 @@ panda_vision_grasp/
 ├── data/                             # BC demo datasets (gitignored, not committed)
 ├── demo_stage1_kinematic_sweep.py    # Stage 1: verification sweep, see media/ GIF above
 ├── demo_stage2_reach_grasp.py        # Stage 2: scripted grasp demo, see media/ GIF above
-├── demo_stage5_rl_failure.py         # Stage 5: renders a policy's rollout, --dual-view adds wrist_cam
+├── demo_stage5_rl_failure.py         # Stage 5: renders a policy's rollout, --dual-view adds wrist_cam, --gripper-latch-delay for item 28
 ├── media/
 │   ├── stage1_kinematic_sweep.gif
 │   ├── stage2_reach_grasp.gif
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
-│       bc15_best.gif, bc18_holdweight.gif, bc19-20.gif, bc19-20_best_case.gif,
-│       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
+│       bc15_best.gif, bc15_latch.gif, bc18_holdweight.gif, bc19-20.gif,
+│       bc19-20_best_case.gif, bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif,
+│       grasp_height_comparison.png,
 │       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md

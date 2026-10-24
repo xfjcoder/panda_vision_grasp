@@ -20,7 +20,7 @@ from PIL import Image
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from grasp_env import EPISODE_STEPS, GraspPixelEnv
+from grasp_env import EPISODE_STEPS, GraspPixelEnv, N_ARM
 
 
 def main():
@@ -31,6 +31,11 @@ def main():
     ap.add_argument("--dual-view", action="store_true",
                      help="Also render wrist_cam (eye-in-hand) side by side with workspace_cam. "
                           "Visualization only -- the policy never sees this view.")
+    ap.add_argument("--gripper-latch-delay", type=int, default=None,
+                     help="Same post-hoc gripper-command hysteresis as eval_policy.py -- once "
+                          "gripper_qpos confirms a close and this many more steps pass, freeze "
+                          "the gripper command fully-closed for the rest of the episode. 5 is "
+                          "the sweet spot found by sweeping on bc15/bc19.")
     args = ap.parse_args()
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
@@ -57,9 +62,19 @@ def main():
     obs, _ = env.reset(seed=args.seed)
     render()
     info = {}
+    has_opened = False
+    close_start = None
     for t in range(EPISODE_STEPS):
         obs_norm = norm_env.normalize_obs(obs)
         action, _ = policy.predict(obs_norm, deterministic=True)
+        if args.gripper_latch_delay is not None:
+            g = obs["proprio"][-1]
+            if g > 0.9:
+                has_opened = True
+            if has_opened and close_start is None and g < 0.75:
+                close_start = t
+            if close_start is not None and t >= close_start + args.gripper_latch_delay:
+                action[N_ARM] = -1.0
         obs, reward, terminated, truncated, info = env.step(action)
         render()
         if terminated or truncated:

@@ -12,7 +12,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from grasp_env import GraspPixelEnv, EPISODE_STEPS
+from grasp_env import GraspPixelEnv, EPISODE_STEPS, N_ARM
 
 
 def main():
@@ -20,6 +20,20 @@ def main():
     ap.add_argument("--run-name", type=str, required=True)
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--base-seed", type=int, default=0)
+    ap.add_argument("--gripper-latch-delay", type=int, default=None,
+                     help="Once proprio's gripper_qpos confirms a close (crosses below 0.75 "
+                          "after having been open) and this many MORE steps have passed, "
+                          "override the policy's own gripper command to fully-closed for the "
+                          "rest of the episode -- a post-hoc hysteresis on just that one output "
+                          "channel, using only the policy's own observable state, no "
+                          "retraining. Targets a diagnosed issue: the learned gripper command "
+                          "itself keeps oscillating after contact (6-13 sign flips per 30 "
+                          "post-close steps vs the scripted expert's constant command), unlike "
+                          "the smooth demos it was trained on. Delay matters a lot -- 0 (latch "
+                          "immediately) actively hurts (cuts off what looks like a brief, "
+                          "useful self-adjusting squeeze), 5 is the sweet spot found by sweeping "
+                          "{0,5,10,15,20,30} on bc19, 15+ also hurts. Omit this flag (None) for "
+                          "the original unmodified behavior.")
     args = ap.parse_args()
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
@@ -36,9 +50,19 @@ def main():
         obs, _ = env.reset(seed=seed)
         ep_reward = 0.0
         info = {}
-        for _ in range(EPISODE_STEPS):
+        has_opened = False
+        close_start = None
+        for t in range(EPISODE_STEPS):
             obs_norm = norm_env.normalize_obs(obs)
             action, _ = policy.predict(obs_norm, deterministic=True)
+            if args.gripper_latch_delay is not None:
+                g = obs["proprio"][-1]
+                if g > 0.9:
+                    has_opened = True
+                if has_opened and close_start is None and g < 0.75:
+                    close_start = t
+                if close_start is not None and t >= close_start + args.gripper_latch_delay:
+                    action[N_ARM] = -1.0
             obs, reward, terminated, truncated, info = env.step(action)
             ep_reward += reward
             if terminated or truncated:
