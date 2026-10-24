@@ -204,6 +204,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    was resolved by scaling up budget before any bigger redesign was needed -- tried next here
    too, see below.
 
+   <p align="center">
+     <img src="media/grasp01.gif" width="280">
+   </p>
+   <p align="center"><sub><code>grasp01</code>, seed 0 -- descends near the object but never centers/times the grasp.</sub></p>
+
 5. **Scaled up 4x (`grasp02`, resumed from `grasp01`'s checkpoint, +3M timesteps = 4M total)
    -- negative result: more budget alone did NOT help here, unlike `barrett_wam`'s analogous
    case.** Same training recipe, no reward/hyperparameter changes. Result: **still 0/20**,
@@ -225,6 +230,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    knob. **Next experiment, not yet tried**: a small nonzero `ent_coef` (e.g. 0.01) to keep
    exploration alive longer, rather than further scaling the same recipe that already showed
    it won't self-correct.
+
+   <p align="center">
+     <img src="media/grasp02.gif" width="280">
+   </p>
+   <p align="center"><sub><code>grasp02</code>, seed 0 -- exploration collapse, locked onto the same incomplete behavior.</sub></p>
 
 6. **`ent_coef=0.01` (`grasp03`, fresh 1M-step run, not resumed -- resuming from `grasp02`
    would have carried forward its already-collapsed std) -- the diagnosed mechanism was fixed,
@@ -250,6 +260,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    `reset()` with a fixed or narrow object-position range, widen `TABLE_XY_RANGE` once reward
    crosses a threshold, so the policy can lock in a working grasp motion before having to
    generalize it across the full table.
+
+   <p align="center">
+     <img src="media/grasp03.gif" width="280">
+   </p>
+   <p align="center"><sub><code>grasp03</code>, seed 0 -- collapse fixed, but never attempts a grasp at all.</sub></p>
 
 7. **Position curriculum (`grasp04`, fresh 1M-step run, `ent_coef=0.01` kept + a
    `CurriculumCallback` widening `TABLE_XY_RANGE`'s sampled scale 0.15 -> 0.4 -> 0.7 -> 1.0
@@ -295,6 +310,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    magnitude of 0.0088 rad, matching the scripted controller's own 0.0119 rad pace almost
    exactly. BC genuinely learned the gentle, precise approach.
 
+   <p align="center">
+     <img src="media/bc01.gif" width="280">
+   </p>
+   <p align="center"><sub><code>bc01</code>, seed 0 -- the gentle, correctly-timed approach BC learned from the demos.</sub></p>
+
    `grasp05` then fine-tuned that checkpoint with PPO (1M steps, `ent_coef=0.01`, same
    VecNormalize stats carried over) -- still 0/20, but **worse** than `bc01` alone, not better.
    Measured the same per-step joint-delta metric: fine-tuning pushed it from 0.0088 to 0.116
@@ -333,6 +353,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    `PROXIMITY_RADIUS` for a handful of the 120 steps, and even there `W_APPROACH_SPEED=0.1`
    produces a per-step penalty of ~0.02-0.03, far too small to compete against an episode-long
    incentive to approach fast.
+
+   <p align="center">
+     <img src="media/grasp05.gif" width="280"> <img src="media/grasp06.gif" width="280">
+   </p>
+   <p align="center"><sub><code>grasp05</code> (left) and <code>grasp06</code> (right), seed 0 -- fine-tuning overwrote <code>bc01</code>'s careful approach; the proximity penalty didn't change that.</sub></p>
 
    **Lesson: a proximity-gated penalty applied with the same weight scale as the always-on
    distance term is automatically dominated by it, roughly in proportion to how much of the
@@ -392,46 +417,13 @@ under the model's own (already-tuned) position actuators, then the gripper closi
    | `bc08` | Auxiliary z-error loss (`train_bc_auxz.py`): a small head on the BC policy's shared actor features predicts the FK-derived vertical grasp-height offset (a scene constant, so no privileged per-episode labels needed), trained jointly with the usual action MSE -- same `bc06` 72k dataset, no new DAgger data, to isolate this one change. First motivated by a depth-parallax probe (below) confirming `wrist_cam`'s apparent object size is a strong, monotonic depth cue (361px at correct height down to 28-75px at 3-8cm too high) while `workspace_cam` carries ~none (flat ~1215px throughout) | 0/20, best mean reward in the project (-7.22, vs `bc06`'s -7.99) and the first round-over-round DROP in action noise (mean\|action\| 0.026, vs `bc06`'s 0.041/`bc07`'s 0.052) -- but the targeted bug did NOT improve: mean vertical offset 0.056m, slightly WORSE than `bc06`'s 0.049m, with fewer trials even attempting a lift (4/20 positive `rise` vs `bc06`'s 7/20) | Auxiliary MSE converged cleanly in training (1.0 -> 0.0034 normalized over 20 epochs) -- the shared trunk CAN represent this quantity precisely from the demo distribution -- but that representation didn't translate into better height-targeting behavior at rollout. A real auxiliary-task pitfall: the trunk can satisfy an auxiliary loss using features the action head's own downstream layers never end up relying on, especially across the open-loop-training / closed-loop-rollout distribution shift every BC method here faces. The best-mean-reward result looks like a side effect of a smoother, lower-magnitude policy from the extra regularizing pressure, not of fixing the specific bug it targeted |
    | `bc13` | DAgger round 5 (4th per-step iteration, on `bc07`'s own rollouts, same `CORRECTION_CAP=0.15`, no auxiliary loss), merged cumulatively with every prior round (`demos_dagger5.npz` 96k + `dagger06.npz` 24k = 120k total) -- user: "go for the DAgger round 5" | **1/20 full success (seed 10) -- the first anywhere in this project's history.** Every metric improved at once: mean reward -5.03 (best yet, vs `bc07`'s -9.02), 14/20 positive-rise (vs `bc07`'s 10/20), z-offset 0.0195m (best yet, vs `bc07`'s 0.033m), yaw align err 4.01/18.07deg (best mean in the project), mean\|action\| 0.0295 (reversing the 3-round upward creep) | Confirms plain per-step DAgger, iterated a 5th time on the previous round's own rollouts, is the one lever in this project with real multi-round compounding evidence -- unlike every auxiliary-loss variant (items 21-23), which plateaued or regressed on the very first try. No sign yet that this lever has stopped working |
 
-   **Every attempt's rollout, not just one representative GIF** -- each panel pair is
-   `workspace_cam` (left) and `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md).
-   For `grasp01`-`08` and `bc01`/`bc02` the right panel is visualization only, added after the
-   fact; neither camera's content changes those checkpoints' behavior. From `bc03` onward
-   `wrist_cam` is ALSO a real policy input (see item 14), so for those two rows the right panel
-   is literally part of what the policy saw. Seed 0 for all rows so the object's start position
-   is identical and only the policy's behavior differs:
-
-   | Run | Rollout |
-   |---|---|
-   | `grasp01` | <img src="media/grasp01.gif" width="280"> |
-   | `grasp02` | <img src="media/grasp02.gif" width="280"> |
-   | `grasp03` | <img src="media/grasp03.gif" width="280"> |
-   | `grasp04` | <img src="media/grasp04.gif" width="280"> |
-   | `bc01` | <img src="media/bc01.gif" width="280"> |
-   | `grasp05` | <img src="media/grasp05.gif" width="280"> |
-   | `grasp06` | <img src="media/grasp06.gif" width="280"> |
-   | `grasp07` | <img src="media/grasp07.gif" width="280"> |
-   | `grasp08` | <img src="media/grasp08.gif" width="280"> |
-   | `bc02` (seed 0) | <img src="media/bc02.gif" width="280"> |
-   | `bc02` (seed 18, best case -- object correctly centered at close phase) | <img src="media/bc02_best_case.gif" width="280"> |
-   | `bc03` (seed 0) | <img src="media/bc03.gif" width="280"> |
-   | `bc03` (seed 9, best case -- grasped and held through the whole lift) | <img src="media/bc03_best_case.gif" width="280"> |
-   | `bc04` (seed 0) | <img src="media/bc04.gif" width="280"> |
-   | `bc04` (seed 18, best case -- firm grasp, lift plateaus just short of threshold) | <img src="media/bc04_best_case.gif" width="280"> |
-   | `bc05_chunked` (seed 0, worst case -- chunk commitment failure, object flung around step 80) | <img src="media/bc05_chunked.gif" width="280"> |
-   | `bc05_chunked` (seed 8, best case -- drift self-corrects over the back half of the episode) | <img src="media/bc05_chunked_best_case.gif" width="280"> |
-   | `bc05_chunked` `--adaptive` (seed 0 -- naive off-grid re-planning, barely functions) | <img src="media/bc05_chunked_adaptive.gif" width="280"> |
-   | `bc06_chunked` (seed 0 -- random-start retrain, never meaningfully touches the object) | <img src="media/bc06_chunked.gif" width="280"> |
-   | `bc06` (seed 0, note: unrelated to `bc06_chunked` above -- naming collision, not data) | <img src="media/bc06.gif" width="280"> |
-   | `bc06` (seed 12, best case -- rise crosses the success threshold, fails only on drift) | <img src="media/bc06_best_case.gif" width="280"> |
-   | `bc06` (seed 13, the other near-miss -- drift stays under threshold, rise falls just short) | <img src="media/bc06_near_miss_drift_ok.gif" width="280"> |
-   | Grasp-height comparison: scripted expert (left, dead-center, offset 0.0003m) vs `bc06` (right, grasping near the top tip, offset 0.049m) -- the root cause behind item 19 below | <img src="media/grasp_height_comparison.png" width="560"> |
-   | `bc07` (seed 18, highest-rise trial this round) | <img src="media/bc07.gif" width="280"> |
-   | `bc08` (seed 0, auxiliary z-loss, low drift but modest lift) | <img src="media/bc08.gif" width="280"> |
-   | `bc08` (seed 17, highest-rise trial this round) | <img src="media/bc08_best_case.gif" width="280"> |
-   | Yaw-alignment comparison: scripted expert (left, flush, align_err~1.7deg mean) vs `bc08` seed 4 (right, corner grab, align_err~20deg) -- item 22's root cause | <img src="media/yaw_alignment_comparison.png" width="560"> |
-   | `bc09` (seed 5, yaw aux loss -- worst yaw error in the whole project, 43deg, item 23) | <img src="media/bc09_worst_yaw.gif" width="280"> |
-   | `bc13` (seed 10, DAgger round 5 -- the trial `eval_policy.py` scored as the project's first clean success; this render is a near-miss of the same trial, see item 24's non-determinism note) | <img src="media/bc13_success.gif" width="280"> |
-   | `bc15` (seed 6, DAgger round 7 -- the project's best checkpoint overall, item 25; clean success, both `rise` and `drift` comfortably past threshold) | <img src="media/bc15_best.gif" width="280"> |
+   **Every attempt's rollout GIF is embedded inline above, next to the item that explains it**
+   (not grouped into one gallery at the end) -- each panel pair is `workspace_cam` (left) and
+   `wrist_cam` (right, an eye-in-hand camera -- see NOTICE.md). For `grasp01`-`08` and
+   `bc01`/`bc02` the right panel is visualization only, added after the fact; neither camera's
+   content changes those checkpoints' behavior. From `bc03` onward `wrist_cam` is ALSO a real
+   policy input (see item 14), so from there the right panel is literally part of what the
+   policy saw.
 
 10. **Action-rate "shaking" -- a separate failure mode from approach speed, found by actually
     watching the GIFs above (user's own observation): the arm visibly vibrates/shakes rather
@@ -499,6 +491,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     realistic path to success will dodge whichever of the two costs more, not learn to do the
     expensive one carefully.**
 
+    <p align="center">
+      <img src="media/grasp07.gif" width="280"> <img src="media/grasp08.gif" width="280">
+    </p>
+    <p align="center"><sub><code>grasp07</code> (left) and <code>grasp08</code> (right), seed 0 -- the new failure: retreating rather than approaching.</sub></p>
+
     **Lesson: gate the penalty on the BEHAVIOR being discouraged (closing distance quickly),
     not on proximity to the goal.** The fix needs to distinguish "distance decreasing fast"
     (rushing in) from "distance roughly constant or increasing while close" (holding position,
@@ -553,6 +550,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     full width with no grip margin -- enough to lift 2cm before losing purchase, not the 9cm
     needed for success.
 
+    <p align="center">
+      <img src="media/bc02.gif" width="280"> <img src="media/bc02_best_case.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc02</code>, seed 0 (left) and seed 18, best case (right) -- alignment fixed on this trial, but noisier overall.</sub></p>
+
     **Lesson: DAgger fixed the problem it targeted (spatial alignment / compounding drift) but
     introduced a new one (noisy, high-magnitude corrections teach a noisier policy overall) --
     confirms this needs either a second DAgger round that also controls for action smoothness
@@ -590,6 +592,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     reward (-9.92) is similar to `bc01`'s (-8.83) and only 2/20 trials show positive `rise` (same
     count as `bc02`), so this isn't yet a broad improvement -- but the ceiling of what's
     achievable clearly moved.
+
+    <p align="center">
+      <img src="media/bc03.gif" width="280"> <img src="media/bc03_best_case.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc03</code>, seed 0 (left) and seed 9, best case (right) -- genuinely grasped and held, failing only on lateral drift during the lift.</sub></p>
 
     **Not yet discussed with the user**: natural next step is a DAgger round on top of `bc03`
     (same recipe as `bc01`->`bc02`, now updated for the dual-camera observation), likely to
@@ -640,6 +647,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     masked shortfall. With `drift` at 0.40m on `bc03`'s worst cases, lift height was never the
     binding constraint; now that drift is smaller, insufficient lift height is visible as its
     own problem, distinct from lateral precision.
+
+    <p align="center">
+      <img src="media/bc04.gif" width="280"> <img src="media/bc04_best_case.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc04</code>, seed 0 (left) and seed 18, best case (right) -- rock-solid grasp, drift shrunk 3-4x, but lift plateaus just short of threshold.</sub></p>
 
     **Not yet discussed with the user**: natural next steps are (a) a further DAgger round
     (iterate again on `bc04`'s own rollouts, same capped-correction recipe -- DAgger is
@@ -692,6 +704,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     chunking hypothesis's upside (each chunk is one coherent, smoother regression target) --
     it just didn't show up reliably enough across seeds to beat per-step DAgger's more modest
     but more consistent gains.
+
+    <p align="center">
+      <img src="media/bc05_chunked.gif" width="280"> <img src="media/bc05_chunked_best_case.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc05_chunked</code>, seed 0, worst case (left, object flung out mid-chunk around step 80) and seed 8, best case (right, drift self-corrects).</sub></p>
 
     **Not yet discussed with the user**: chunking's failure mode here looks tied to the chunk
     boundary landing badly relative to the close/lift transition (a bad chunk starting right
@@ -749,6 +766,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     justified given per-step DAgger (`bc04`) already has the better, more reliable track
     record of the methods tried so far.
 
+    <p align="center">
+      <img src="media/bc05_chunked_adaptive.gif" width="280"> <img src="media/bc06_chunked.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc05_chunked --adaptive</code> (left, off-grid re-plan it was never trained for) and <code>bc06_chunked</code> (right, the random-start retrain collapsed outright).</sub></p>
+
 18. **DAgger round 3 on `bc04` (`bc06`) -- the best result in the project, run in parallel
     with item 17 above per the user's "try both and compare" request.** Same recipe as
     `bc03`->`bc04` (`CORRECTION_CAP=0.15`, rollout `bc04`'s own policy, relabel with fresh
@@ -783,6 +805,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     training-time re-planning grid, a real constraint on receding-horizon designs that per-step
     methods don't have to worry about.
 
+    <p align="center">
+      <img src="media/bc06.gif" width="280"> <img src="media/bc06_best_case.gif" width="280"> <img src="media/bc06_near_miss_drift_ok.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc06</code>, seed 0 (left), seed 12 -- clears the rise threshold, fails only on drift (middle), seed 13 -- the other near-miss (right).</sub></p>
+
     **Not yet discussed with the user**: given this trial run's margin (rise comfortably over
     threshold, drift only ~30% over), a 3rd per-step DAgger round on `bc06` looks like the
     single most promising next step in the project -- genuinely plausible to produce the first
@@ -803,7 +830,14 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     the way from the cube's center (half-height 0.03m) past its top edge, identical to 3 decimal
     places across two full cumulative DAgger rounds (`bc04`: 0.0488m, `bc06`: 0.0489m). Visual
     confirmation in `media/grasp_height_comparison.png`: the same wrist-cam close-moment view,
-    expert dead-center vs `bc06` pads riding the top tip. Since the expert itself is centered,
+    expert dead-center vs `bc06` pads riding the top tip.
+
+    <p align="center">
+      <img src="media/grasp_height_comparison.png" width="480">
+    </p>
+    <p align="center"><sub>Scripted expert (left, dead-center, offset 0.0003m) vs <code>bc06</code> (right, grasping near the top tip, offset 0.049m), both at the wrist-cam close moment.</sub></p>
+
+    Since the expert itself is centered,
     this is a purely policy-learned bias, not a labeling defect -- most plausibly a depth/scale
     misjudgment from the camera views (vertical depth is the hardest quantity for a
     fixed-viewpoint camera to recover precisely, unlike lateral position which projects more
@@ -831,6 +865,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     near `bc02`'s uncapped 0.226 blowup, but a 3-round upward trend (0.038 -> 0.041 -> 0.052)
     worth watching. Fixing the vertical bias and controlling correction noise appear to be in
     some tension at the current data scale and correction cap.
+
+    <p align="center">
+      <img src="media/bc07.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc07</code>, seed 18 -- this round's highest-rise trial.</sub></p>
 
     **Not yet discussed with the user**: this reframes what the "last mile" problem actually is.
     Lateral drift was real and DAgger has reliably shrunk it, but the vertical grasp-height bias
@@ -900,6 +939,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     of the auxiliary task's regularizing pressure producing an overall smoother, lower-magnitude
     policy, not of it fixing the specific bug it was designed for.
 
+    <p align="center">
+      <img src="media/bc08.gif" width="280"> <img src="media/bc08_best_case.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc08</code>, seed 0 (left, low drift but modest lift) and seed 17, this round's highest-rise trial (right).</sub></p>
+
     **Not yet discussed with the user**: neither the 4th DAgger round (`bc07`) nor the auxiliary
     z-loss (`bc08`) fixed the vertical-grasp bias in isolation -- `bc07` nudged it (0.049->0.033)
     at the cost of overall noise/drift, `bc08` didn't move it at all despite perfecting the
@@ -929,7 +973,14 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     the training data, always correct in the label, but imperfectly reproduced by the trained
     policy. `bc06` (mean 5.2 deg, max 25.2 deg) and `bc08` (mean 6.5 deg, max 19.7 deg) are both
     roughly 3x worse than the expert on average, with occasional severe (~20-25 deg)
-    misalignments. Visual confirmation in `media/yaw_alignment_comparison.png`: `bc08`'s worst
+    misalignments.
+
+    <p align="center">
+      <img src="media/yaw_alignment_comparison.png" width="480">
+    </p>
+    <p align="center"><sub>Scripted expert (left, flush, align_err~1.7deg mean) vs <code>bc08</code> seed 4 (right, corner grab, align_err~20deg), both at the wrist-cam close moment.</sub></p>
+
+    `bc08`'s worst
     case (seed 4, ~20 deg error) shows only a thin corner of the cube caught between the jaws,
     most of the cube hanging off to the side -- exactly the "claws not aligned with the side"
     symptom, and exactly the kind of small-contact-area, off-axis grip that would be slippery
@@ -983,6 +1034,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     checkpoint (0.077m, 0.064m) and positive-rise collapsing to 0/20 in both cases. Using `bc07`'s
     96k DAgger data instead of `bc06`'s 72k (`bc11` vs `bc08`, same `z`-only recipe) didn't help
     either -- z-offset got worse (0.068m vs 0.056m) and positive-rise cratered (1/20 vs 4/20).
+
+    <p align="center">
+      <img src="media/bc09_worst_yaw.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc09</code>, seed 5 -- worst yaw error in the whole project, 43deg.</sub></p>
 
     **Honest read: stacking auxiliary losses on this small shared CNN+MLP trunk looks like
     multi-task interference, not synergy.** Each additional auxiliary head competes for the same
@@ -1046,6 +1102,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     `bc08` seed 17 in item 21), so the GIF shown is a near-miss of the SAME trial that
     `eval_policy.py`'s run scored as a clean success, not a cherry-picked different seed.
 
+    <p align="center">
+      <img src="media/bc13_success.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc13</code>, seed 10 -- the trial <code>eval_policy.py</code> scored as the project's first clean success; this render is a near-miss of the same trial (see non-determinism note above).</sub></p>
+
     **Not yet discussed with the user**: the project's central goal (pixels-to-actions grasping
     with no privileged state) has now been demonstrated at least once, but 1/20 is still a low
     success rate -- a 6th DAgger round on `bc13`'s own rollouts is the obvious next step given
@@ -1093,6 +1154,11 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     `drift=0.0141m`, `success=True`) for the gallery, confirming the render/eval
     non-determinism noted for `bc13` goes both ways: this one reproduced cleanly as a success,
     unlike `bc13`'s near-miss render.
+
+    <p align="center">
+      <img src="media/bc15_best.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc15</code>, seed 6 -- the project's best checkpoint overall; clean success, both <code>rise</code> and <code>drift</code> comfortably past threshold.</sub></p>
 
     **Not yet discussed with the user**: a 10th round on top of `bc17` was NOT run, since two
     consecutive rounds (`bc16` then `bc17`) both declined on the metric that matters
