@@ -1560,32 +1560,43 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     200k-step budget, no sign of recovering toward `bc21`'s own -0.203/11/40 baseline despite
     `approx_kl` staying tiny (0.0001-0.002 per update) the entire run.
 
-    <p align="center">
-      <img src="media/grasp09_stdcollapse.gif" width="280"> <img src="media/grasp10_stdfixed.gif" width="280">
-    </p>
-    <p align="center"><sub><code>grasp09</code> (std=1.0 uncorrected, left -- frozen at reset) and <code>grasp10</code> (std=0.1 corrected, right -- attempts a lift but still well below champion <code>bc21</code>).</sub></p>
+    **User: "try a smaller std like 0.03" -- `grasp11` (identical recipe, `log_std` recalibrated
+    to std=0.03 instead of 0.1): a real, qualitatively different result -- `4/40 succeeded`
+    (reward -4.01, mean `rise` 0.0429), the first genuine successes from any RL-fine-tune
+    attempt in this project's history.** Shrinking std further continued the same monotonic
+    trend `grasp09`->`grasp10` already showed:
 
-    **Conclusion: even after fixing a real architectural gap, RL fine-tuning on top of `bc21`
-    is a regression, not an improvement -- an 8th independent intervention landing at or below
-    the champion.** Consistent with item 29's standing finding: `bc21`'s success depends on a
-    precise minority of high-variance corrective transitions, and PPO's on-policy value/
-    advantage estimates -- built from trajectories that are, even post-fix, meaningfully
-    noisier than the BC data `bc21` was trained on -- don't supply a clean enough gradient
-    signal to refine that precision; they erode it, gently but consistently, regardless of how
-    small the KL-per-update is kept.
+    | checkpoint | std | success | mean reward | mean rise |
+    |---|---|---|---|---|
+    | champion `bc21` (no fine-tune) | -- | 11/40 | -0.203 | -- |
+    | `grasp09` | 1.0 (uncorrected) | 0/40 | -19.62 | -0.0013 |
+    | `grasp10` | 0.1 | 0/40 | -8.87 | 0.0118 |
+    | `grasp11` | 0.03 | **4/40** | -4.01 | 0.0429 |
+
+    Still below champion, but no longer a clean regression story -- smaller std gave PPO's
+    rollout collection enough fidelity to actually execute some of `bc21`'s already-good
+    corrective behavior instead of drowning it in exploration noise, and once a handful of
+    rollouts complete successfully, PPO's gradient has a real positive signal to reinforce.
+    `grasp12` (std=0.01, continuing the sweep in the same direction) is running now.
+
+    <p align="center">
+      <img src="media/grasp09_stdcollapse.gif" width="220"> <img src="media/grasp10_stdfixed.gif" width="220"> <img src="media/grasp11_std003.gif" width="220">
+    </p>
+    <p align="center"><sub><code>grasp09</code> (std=1.0, frozen at reset), <code>grasp10</code> (std=0.1, attempts a lift), <code>grasp11</code> (std=0.03, seed 16 -- a genuine success).</sub></p>
 
     **Methodological note**: `grasp10`'s GIF (seed 1, generated via `demo_stage5_rl_failure.py`)
     shows `rise=0.0135m drift=0.0539m`, not the eval sweep's logged trial 1
     (`rise=0.0376m drift=0.0098m`) for the identical checkpoint/seed -- expected, not a new bug,
     per item 31's already-documented MuJoCo warm-start-carryover footnote (isolated single-
-    episode runs aren't bit-exact replays of a sequential sweep's later trials).
+    episode runs aren't bit-exact replays of a sequential sweep's later trials). `grasp11`'s GIF
+    (seed 16) matches its eval sweep row closely (`rise=0.1793` vs `0.1758`, both success).
 
-    **Not yet discussed with the user**: only one std value (0.1) and one conservative
-    hyperparameter set were tried; smaller std (e.g. 0.01-0.03, closer to the actual action
-    scale), freezing the policy's lower/shared layers and fine-tuning only a small residual
-    head, or checkpointing and evaluating every 20k steps (rather than only before/after) to
-    catch a transient improvement before it erodes, are all untried variations on this same
-    lever, not ruled out by this one attempt.
+    **Not yet discussed with the user**: the std sweep (1.0 -> 0.1 -> 0.03) is still improving,
+    not yet plateaued or past its peak -- `grasp12` (std=0.01) will show whether it keeps
+    helping, flattens, or (per the capacity-increase pattern from item 29) overshoots into a
+    regression once std gets small enough that PPO's updates stop finding any useful gradient
+    at all. Also still untried: freezing the policy's lower/shared layers and fine-tuning only
+    a small head, and checkpointing/evaluating every 20k steps rather than only before/after.
 
 ## Repository layout
 
@@ -1631,7 +1642,8 @@ panda_vision_grasp/
 │       bc19-20_best_case.gif, bc22_capacity.gif, bc23_earlystop.gif, bc25_loop_round1.gif,
 │       bc26_plateau_round2.gif, bc29_residual.gif, bc30_framestack.gif,
 │       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp09_stdcollapse.gif,
-│       grasp10_stdfixed.gif, grasp_height_comparison.png, yaw_alignment_comparison.png
+│       grasp10_stdfixed.gif, grasp11_std003.gif, grasp_height_comparison.png,
+│       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
