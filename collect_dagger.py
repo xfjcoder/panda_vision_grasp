@@ -54,6 +54,17 @@ def main():
                      help="Existing run (e.g. bc03) whose policy drives the rollout")
     ap.add_argument("--episodes", type=int, default=200)
     ap.add_argument("--out", type=str, default="data/dagger01.npz")
+    ap.add_argument("--seed-offset", type=int, default=0,
+                     help="Episodes are seeded args.seed_offset + 0..episodes-1. Default 0 "
+                          "reproduces every prior round's seeds (0..199) -- fine when the "
+                          "champion changed round to round (items 18-25's by-hand rounds always "
+                          "did), but collecting AGAIN from the SAME unpromoted champion with the "
+                          "default offset re-visits the identical seeds and yields a byte-for-"
+                          "byte-identical dataset (caught when dagger_loop.py's round 2 produced "
+                          "a dagger12.npz identical to round 1's dagger11.npz, both from bc21 -- "
+                          "see README item 30). dagger_loop.py now passes a fresh offset every "
+                          "round so repeat collections from a plateaued champion actually explore "
+                          "new states.")
     ap.add_argument("--gripper-latch-delay", type=int, default=5,
                      help="Apply the same post-hoc gripper-command latch as eval_policy.py "
                           "(README item 28) to the LEARNER action that drives which states get "
@@ -75,7 +86,7 @@ def main():
     n_would_succeed = 0
 
     for ep in range(args.episodes):
-        obs, _ = env.reset(seed=ep)
+        obs, _ = env.reset(seed=args.seed_offset + ep)
         q_pregrasp = env.q_target.copy()
         obj_pos0 = env.obj_pos0.copy()
         ideal_targets = build_scripted_targets(env.model, q_pregrasp, obj_pos0)

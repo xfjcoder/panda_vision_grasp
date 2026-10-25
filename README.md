@@ -1409,11 +1409,52 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     </p>
     <p align="center"><sub><code>bc25</code>, the loop's first real candidate -- a near-tie with champion <code>bc21</code>, correctly left unpromoted.</sub></p>
 
-    **Not yet discussed with the user**: `bc21` remains the champion. The infrastructure
-    (`train_bc2.py`, `dagger_loop.py`) is validated and ready to keep running -- more rounds,
-    a different starting champion, or a larger `--eval-trials` to cut through the noise this
-    round's near-tie sat inside of are all live options now that the systematic mechanism
-    itself works, rather than needing a human to hand-drive every step.
+    **User: "run more loop rounds." Caught a second real bug, then ran three independent
+    rounds, all consistent: plain DAgger on top of `bc21` has genuinely plateaued, not just
+    eval-noised.** Re-running the loop from the still-current champion `bc21` immediately hit
+    `collect_dagger.py`'s episode seeding: `env.reset(seed=ep)` for `ep in range(episodes)` --
+    fixed at `0..199` every single call, with no round-to-round variation. Every prior manual
+    DAgger round (items 18-25) changed the CHAMPION each round, so reusing the same 200 seeds
+    against a new policy naturally produced new corrections. `dagger_loop.py` can re-collect
+    from the SAME unpromoted champion round after round, which this fix in `collect_dagger.py`
+    didn't anticipate -- round 2's `dagger12.npz` came out byte-identical to round 1's
+    `dagger11.npz` (confirmed via `md5sum`), so "`bc26` ties `bc25` at 10/40" was actually the
+    same checkpoint's data retrained from the same random seed, not a second data point at all.
+    Fixed with a `--seed-offset` flag on `collect_dagger.py` (episodes seeded
+    `seed_offset + 0..episodes-1`); `dagger_loop.py` now passes `dagger_num * collect_episodes`
+    as the offset so every round's collection -- even repeats from the same stuck champion --
+    samples genuinely new states.
+
+    With that fixed, three independent single-round attempts from champion `bc21` (each: 216k
+    base transitions + a distinct, non-overlapping 24k-episode slice of fresh `bc21`-driven
+    corrections, same `net_arch=64,64`/`hold_weight=1.5` recipe, same 40-trial eval):
+
+    | data (seeds)         | candidate | success | mean reward |
+    |-----------------------|-----------|---------|-------------|
+    | champion `bc21`       | --        | 11/40   | -0.203      |
+    | `dagger11` (0-199)    | `bc25`    | 10/40   | -1.054      |
+    | `dagger12` (2400-2599)| `bc26`    | 5/40    | -3.187      |
+    | `dagger13` (2600-2799)| `bc27`    | 7/40    | -2.340      |
+
+    All three independent rounds land below the champion, with real run-to-run spread (5-10/40)
+    purely from which 24k corrective states happened to get sampled -- consistent with item 29's
+    finding that the task's success hinges on a minority of high-variance corrective
+    transitions, so one more batch of them can easily help OR hurt depending on which specific
+    states it contains. None of the three got lucky. This is the plain-DAgger-on-`bc21` lever
+    genuinely exhausted, not an artifact of a single noisy round.
+
+    <p align="center">
+      <img src="media/bc26_plateau_round2.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc26</code> (seed 5, one of the three post-fix round attempts) -- a clean miss, representative of all three landing below champion <code>bc21</code>.</sub></p>
+
+    **Not yet discussed with the user**: `bc21` remains the champion after four real
+    DAgger-loop attempts (`bc25`/`bc26`/`bc27` plus the discarded duplicate). Collecting yet
+    more corrections from `bc21` itself looks like a diminishing-returns lever at this point --
+    the more promising untried direction is starting the loop from a DIFFERENT seed or recipe
+    (e.g. a different `--hold-weight`, or seeding `train_bc2.py` with a different `--seed` so
+    the candidate isn't just `bc21`'s own weights nudged by noisy extra data), not simply
+    repeating the same recipe against the same champion again.
 
 ## Repository layout
 
@@ -1453,6 +1494,7 @@ panda_vision_grasp/
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
 │       bc15_best.gif, bc15_nolatch.gif, bc15_latch.gif, bc18_holdweight.gif, bc19-20.gif,
 │       bc19-20_best_case.gif, bc22_capacity.gif, bc23_earlystop.gif, bc25_loop_round1.gif,
+│       bc26_plateau_round2.gif,
 │       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
 │       yaw_alignment_comparison.png
 ├── requirements.txt

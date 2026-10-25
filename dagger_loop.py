@@ -101,8 +101,10 @@ def main():
     for round_i in range(1, args.max_rounds + 1):
         print(f"\n=== round {round_i}: collecting corrections from {champion} ===")
         dagger_out = HERE / "data" / f"dagger{dagger_num:02d}.npz"
+        seed_offset = dagger_num * args.collect_episodes
         run(["python3", "collect_dagger.py", "--run-name", champion,
-             "--episodes", str(args.collect_episodes), "--out", str(dagger_out)],
+             "--episodes", str(args.collect_episodes), "--out", str(dagger_out),
+             "--seed-offset", str(seed_offset)],
             HERE / "runs" / f"dagger{dagger_num:02d}_collect.log")
 
         new_data = HERE / "data" / f"demos_dagger{dagger_num}.npz"
