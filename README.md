@@ -1524,6 +1524,69 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     negative after one shot. Also untried: combining two interventions at once (e.g.
     frame-stacking ON TOP OF a fresh DAgger round, not just on `bc21`'s existing data).
 
+32. **User: "try RL fine-tuning from bc21" -- found a real, previously-undiscovered bug that
+    retroactively explains every RL-fine-tune-from-BC failure in this project's history
+    (`grasp05`-`grasp08`, items 9-11), not just this new attempt.**
+
+    **`grasp09` (PPO fine-tune from `bc21` via `train.py --resume`, `lr=1e-5` -- 30x below the
+    default that wrecked `bc01` in `grasp05` -- `ent_coef=0.0`, 200k steps, the already-tuned
+    `W_APPROACH_SPEED`/`W_SMOOTH` reward shaping from items 9-10 still active): 0/40, mean
+    reward -19.62, mean `rise` -0.0013 -- frozen at the reset value in nearly every trial, the
+    same "never attempts anything" shape item 23's bad early-stop checkpoint showed.** The
+    training log's `ep_rew_mean` was already ~-32 at the FIRST logged rollout (16k timesteps,
+    essentially bc21's unmodified weights) and stayed flat there the whole run -- not a gradual
+    overwrite, broken from step zero.
+
+    **Root cause, checked directly**: `PPO.load('runs/bc21/checkpoints/final').policy.log_std`
+    is `[0,0,0,0,0,0,0,0]` -- std=1.0 on every action dimension, PPO's untouched default init.
+    `train_bc2.py`'s (and every earlier `train_bc*.py`'s) loss only backprops through the
+    action distribution's MEAN (`dist.distribution.mean` in `batch_mse`) -- `log_std` is a
+    separate learnable parameter that pure behavior cloning never touches, so it's stuck at
+    init in EVERY `bc0N`/`bc2N` checkpoint in this project, not just `bc21`. On-policy PPO's
+    rollout collection always samples stochastically (not `deterministic=True`, unlike every
+    eval/demo/collect script here) -- so fine-tuning from any BC checkpoint starts by executing
+    near-pure unit-Gaussian noise on top of a policy whose real action scale is ~0.03-0.05
+    (the project's own mean\|action\| diagnostic, items 10/19/25). This is a highly plausible
+    explanation for why `grasp05`-`grasp08` (fine-tuned from `bc01`) all degenerated into fast/
+    shaky/retreating behavior (items 9-11) rather than gently improving on BC's careful
+    approach: their first on-policy rollouts were equally noise-dominated from the start.
+
+    **Fix tried**: loaded `bc21`, manually set `policy.log_std.data` to `log(0.1)` (std=0.1,
+    roughly 2-3x the project's own action-scale diagnostic, enough headroom to explore without
+    swamping the calibrated mean), saved as `bc21_stdfix`, relaunched identically as `grasp10`.
+    **Real improvement, but still far below champion**: 0/40, mean reward -8.87 (vs `grasp09`'s
+    -19.62), mean `rise` 0.0118 (vs -0.0013) -- the std fix roughly halved the damage and let
+    some trials genuinely attempt a lift, but `ep_rew_mean` was again flat (~-13) for the whole
+    200k-step budget, no sign of recovering toward `bc21`'s own -0.203/11/40 baseline despite
+    `approx_kl` staying tiny (0.0001-0.002 per update) the entire run.
+
+    <p align="center">
+      <img src="media/grasp09_stdcollapse.gif" width="280"> <img src="media/grasp10_stdfixed.gif" width="280">
+    </p>
+    <p align="center"><sub><code>grasp09</code> (std=1.0 uncorrected, left -- frozen at reset) and <code>grasp10</code> (std=0.1 corrected, right -- attempts a lift but still well below champion <code>bc21</code>).</sub></p>
+
+    **Conclusion: even after fixing a real architectural gap, RL fine-tuning on top of `bc21`
+    is a regression, not an improvement -- an 8th independent intervention landing at or below
+    the champion.** Consistent with item 29's standing finding: `bc21`'s success depends on a
+    precise minority of high-variance corrective transitions, and PPO's on-policy value/
+    advantage estimates -- built from trajectories that are, even post-fix, meaningfully
+    noisier than the BC data `bc21` was trained on -- don't supply a clean enough gradient
+    signal to refine that precision; they erode it, gently but consistently, regardless of how
+    small the KL-per-update is kept.
+
+    **Methodological note**: `grasp10`'s GIF (seed 1, generated via `demo_stage5_rl_failure.py`)
+    shows `rise=0.0135m drift=0.0539m`, not the eval sweep's logged trial 1
+    (`rise=0.0376m drift=0.0098m`) for the identical checkpoint/seed -- expected, not a new bug,
+    per item 31's already-documented MuJoCo warm-start-carryover footnote (isolated single-
+    episode runs aren't bit-exact replays of a sequential sweep's later trials).
+
+    **Not yet discussed with the user**: only one std value (0.1) and one conservative
+    hyperparameter set were tried; smaller std (e.g. 0.01-0.03, closer to the actual action
+    scale), freezing the policy's lower/shared layers and fine-tuning only a small residual
+    head, or checkpointing and evaluating every 20k steps (rather than only before/after) to
+    catch a transient improvement before it erodes, are all untried variations on this same
+    lever, not ruled out by this one attempt.
+
 ## Repository layout
 
 ```
@@ -1567,8 +1630,8 @@ panda_vision_grasp/
 │       bc15_best.gif, bc15_nolatch.gif, bc15_latch.gif, bc18_holdweight.gif, bc19-20.gif,
 │       bc19-20_best_case.gif, bc22_capacity.gif, bc23_earlystop.gif, bc25_loop_round1.gif,
 │       bc26_plateau_round2.gif, bc29_residual.gif, bc30_framestack.gif,
-│       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
-│       yaw_alignment_comparison.png
+│       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp09_stdcollapse.gif,
+│       grasp10_stdfixed.gif, grasp_height_comparison.png, yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
