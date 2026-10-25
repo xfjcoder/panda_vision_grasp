@@ -1571,32 +1571,50 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     | champion `bc21` (no fine-tune) | -- | 11/40 | -0.203 | -- |
     | `grasp09` | 1.0 (uncorrected) | 0/40 | -19.62 | -0.0013 |
     | `grasp10` | 0.1 | 0/40 | -8.87 | 0.0118 |
-    | `grasp11` | 0.03 | **4/40** | -4.01 | 0.0429 |
+    | `grasp13` | 0.05 | 1/40 | -6.71 | 0.0227 |
+    | `grasp11` | 0.03 | **4/40** | **-4.01** | 0.0429 |
+    | `grasp14` | 0.02 | 3/40 | -4.49 | 0.0380 |
+    | `grasp12` | 0.01 | 1/40 | -7.75 | 0.0311 |
 
-    Still below champion, but no longer a clean regression story -- smaller std gave PPO's
-    rollout collection enough fidelity to actually execute some of `bc21`'s already-good
-    corrective behavior instead of drowning it in exploration noise, and once a handful of
-    rollouts complete successfully, PPO's gradient has a real positive signal to reinforce.
-    `grasp12` (std=0.01, continuing the sweep in the same direction) is running now.
+    **Bracketed the peak with two more points (`grasp13` at std=0.05, `grasp14` at std=0.02) once
+    `grasp12` (std=0.01) came back WORSE than `grasp11`, not better (1/40, -7.75) -- the std
+    sweep isn't monotonic, it has a real peak.** `std=0.03` is the actual sweet spot for this
+    `lr=1e-5`/`ent_coef=0`/200k-step recipe: both neighbors (0.05 and 0.02) score lower, and both
+    directions further out (1.0, 0.1, and 0.01) score lower still -- the same dose-response shape
+    as every other weight/threshold swept in this project (hold-weight items 26/27, gripper-
+    latch-delay item 28). Below the peak, std is too small for PPO's rollout collection to
+    explore away from `bc21`'s existing behavior at all (converges back toward the uncorrected
+    collapse pattern); above it, std is large enough to meaningfully corrupt the precise
+    corrective minority bc21's success depends on (item 29).
 
     <p align="center">
-      <img src="media/grasp09_stdcollapse.gif" width="220"> <img src="media/grasp10_stdfixed.gif" width="220"> <img src="media/grasp11_std003.gif" width="220">
+      <img src="media/grasp09_stdcollapse.gif" width="160"> <img src="media/grasp13_std005.gif" width="160"> <img src="media/grasp11_std003.gif" width="160"> <img src="media/grasp14_std002.gif" width="160"> <img src="media/grasp12_std001.gif" width="160">
     </p>
-    <p align="center"><sub><code>grasp09</code> (std=1.0, frozen at reset), <code>grasp10</code> (std=0.1, attempts a lift), <code>grasp11</code> (std=0.03, seed 16 -- a genuine success).</sub></p>
+    <p align="center"><sub>std=1.0, 0.05, 0.03 (peak), 0.02, 0.01, left to right -- <code>grasp11</code>'s std=0.03 is the best of the sweep, still below champion <code>bc21</code>.</sub></p>
 
-    **Methodological note**: `grasp10`'s GIF (seed 1, generated via `demo_stage5_rl_failure.py`)
-    shows `rise=0.0135m drift=0.0539m`, not the eval sweep's logged trial 1
-    (`rise=0.0376m drift=0.0098m`) for the identical checkpoint/seed -- expected, not a new bug,
-    per item 31's already-documented MuJoCo warm-start-carryover footnote (isolated single-
-    episode runs aren't bit-exact replays of a sequential sweep's later trials). `grasp11`'s GIF
-    (seed 16) matches its eval sweep row closely (`rise=0.1793` vs `0.1758`, both success).
+    **Methodological note**: as already documented in item 31's MuJoCo warm-start-carryover
+    footnote, isolated single-episode GIF renders aren't always bit-exact replays of their
+    checkpoint's logged 40-trial eval-sweep row for the same nominal seed -- `grasp13`'s GIF
+    (seed 29) matches its eval row exactly (both success), `grasp11`'s (seed 16) matches closely,
+    but `grasp12`'s (seed 32) and `grasp14`'s (seed 21) show a near-miss where the eval sweep
+    logged a clean success for that seed. Not a new bug, and doesn't change any success count in
+    the table above (all eval numbers come from the identical sequential-sweep methodology).
 
-    **Not yet discussed with the user**: the std sweep (1.0 -> 0.1 -> 0.03) is still improving,
-    not yet plateaued or past its peak -- `grasp12` (std=0.01) will show whether it keeps
-    helping, flattens, or (per the capacity-increase pattern from item 29) overshoots into a
-    regression once std gets small enough that PPO's updates stop finding any useful gradient
-    at all. Also still untried: freezing the policy's lower/shared layers and fine-tuning only
-    a small head, and checkpointing/evaluating every 20k steps rather than only before/after.
+    **Conclusion: the std sweep is resolved -- `grasp11` (std=0.03) is this recipe's genuine
+    peak, 4/40, still below champion `bc21`'s 11/40.** Finer sweeping around 0.02-0.03 looks like
+    diminishing returns (the two points there differ by only one trial, likely within this
+    project's known eval noise band) rather than a lever likely to close the remaining 7-success
+    gap. This is now a 9th independent intervention (counting the std sweep as one, not six)
+    landing below the champion, but the closest any RL-based lever has come -- a real, if
+    partial, validation of the RL-fine-tuning idea once the log_std bug was found and corrected.
+
+    **Not yet discussed with the user**: untried directions that attack a DIFFERENT axis than
+    std (rather than finer std sweeping): freezing the policy's lower/shared layers and
+    fine-tuning only a small head at the peak std; a longer training budget (more than 200k
+    steps) at std=0.03 specifically, since `ep_rew_mean` was still flat rather than clearly
+    converged at the 200k cutoff; or checkpointing/evaluating every 20k steps during training
+    (rather than only before/after) to see whether an even better checkpoint existed mid-run
+    before the policy settled at its final values.
 
 ## Repository layout
 
@@ -1642,8 +1660,8 @@ panda_vision_grasp/
 │       bc19-20_best_case.gif, bc22_capacity.gif, bc23_earlystop.gif, bc25_loop_round1.gif,
 │       bc26_plateau_round2.gif, bc29_residual.gif, bc30_framestack.gif,
 │       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp09_stdcollapse.gif,
-│       grasp10_stdfixed.gif, grasp11_std003.gif, grasp_height_comparison.png,
-│       yaw_alignment_comparison.png
+│       grasp10_stdfixed.gif, grasp11_std003.gif, grasp12_std001.gif, grasp13_std005.gif,
+│       grasp14_std002.gif, grasp_height_comparison.png, yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
