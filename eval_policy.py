@@ -12,7 +12,9 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+from framestack_env import FrameStackWristEnv
 from grasp_env import GraspPixelEnv, EPISODE_STEPS, N_ARM
+from residual_utils import load_mean_action
 
 
 def main():
@@ -40,7 +42,10 @@ def main():
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
     policy = PPO.load(run_dir / "checkpoints" / "final")
+    mean_action = load_mean_action(run_dir)
     env = GraspPixelEnv()
+    if policy.observation_space["wrist_image"].shape[0] == 6:
+        env = FrameStackWristEnv(env)  # item 31: trained against a stacked-wrist checkpoint
     vec_env = DummyVecEnv([lambda: env])
     norm_env = VecNormalize.load(str(run_dir / "checkpoints" / "vecnormalize_final.pkl"), vec_env)
     norm_env.training = False
@@ -57,6 +62,8 @@ def main():
         for t in range(EPISODE_STEPS):
             obs_norm = norm_env.normalize_obs(obs)
             action, _ = policy.predict(obs_norm, deterministic=True)
+            if mean_action is not None:
+                action = action + mean_action[t]
             if args.gripper_latch_delay >= 0:
                 g = obs["proprio"][-1]
                 if g > 0.9:

@@ -1456,6 +1456,74 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     the candidate isn't just `bc21`'s own weights nudged by noisy extra data), not simply
     repeating the same recipe against the same champion again.
 
+31. **User: "anything we can do to improve the bc training" -- tried the cheap recipe variation,
+    then both structural directions flagged after item 30 (residual-action learning,
+    frame-stacked wrist camera), compared head to head against champion `bc21`.**
+
+    **(a) Cheap recipe variation**: one more `dagger_loop.py` round from `bc21`, same mechanism
+    as item 30 but `--hold-weight 1.75` instead of `1.5` (fresh data, seeds 2800-2999) --
+    `bc28` scored 9/40 (reward -1.334), below champion, not promoted. Consistent with the
+    dose-response curve item 27 already mapped (1.5x is the peak; 1.75x sits on the downslope
+    toward 2x's already-documented regression).
+
+    **(b) Residual-action learning (`train_bc_residual.py`)**: trains the network to predict
+    `demo_action - mean_action[t]` (a fixed per-timestep mean across training episodes, needing
+    no privileged state) instead of the raw action; `eval_policy.py`/`demo_stage5_rl_failure.py`/
+    `collect_dagger.py` add `mean_action[t]` back via `residual_utils.load_mean_action`,
+    auto-detected per checkpoint. Trained on the EXACT SAME data as champion `bc21`
+    (`demos_dagger10.npz`) to isolate the parameterization as the only lever. `mean |residual|`
+    (0.097) came out well under half of `mean |raw action|` (0.225), confirming the mean
+    baseline does absorb a real chunk of the signal as intended -- but `bc29` still only scored
+    **6/40** (reward -2.853), worse than champion. Its val-loss curve bottoms at epoch 0 and
+    climbs steadily to epoch 19, the same overfitting shape item 29 found for plain action
+    regression -- the "easy majority dominates aggregate loss" effect isn't specific to raw
+    action space, it persists in residual space too.
+
+    **(c) Frame-stacked wrist camera (`train_bc_framestack.py`, `framestack_env.py`)**: wraps
+    the wrist camera to 64x64x6 (previous + current frame on the channel axis), giving the CNN
+    its first-ever access to slip DIRECTION rather than just slip position. Also trained on the
+    identical `bc21` data. Caught two real bugs getting this far: (1) SB3 internally transposes
+    image spaces to channel-first, so the auto-detect check needs `observation_space["wrist_image"
+    "].shape[0] == 6`, not `shape[-1]` (which is the pixel width, 64, not the channel count) --
+    `eval_policy.py` crashed with a `VecNormalize` shape-mismatch assertion on the first attempt,
+    caught before trusting any number. (2) `FrameStackWristEnv` (a `gym.Wrapper`) doesn't forward
+    `.model`/`.data`/`.q_target` to the underlying `GraspPixelEnv` the way earlier assumed --
+    fixed by keeping a direct `sim`/`env.unwrapped` reference in `demo_stage5_rl_failure.py` and
+    `collect_dagger.py` for those accesses. With both fixed, `bc30` scored 8/40 (reward -1.546)
+    -- also below champion, and its val curve shows the identical epoch-1-then-climbing
+    overfitting shape (0.0327 -> 0.0496). Doubling the wrist CNN's input channels is effectively
+    a capacity increase at the first conv layer, and item 29 already found capacity increases
+    backfire for this task -- consistent, not a new mechanism.
+
+    | candidate | data | success | mean reward |
+    |-----------|------|---------|-------------|
+    | champion `bc21` | `demos_dagger10` (216k) | 11/40 | -0.203 |
+    | `bc28` (hold_weight=1.75) | +24k fresh (seeds 2800-2999) | 9/40 | -1.334 |
+    | `bc29` (residual-action) | same as champion | 6/40 | -2.853 |
+    | `bc30` (frame-stacked wrist) | same as champion | 8/40 | -1.546 |
+
+    <p align="center">
+      <img src="media/bc29_residual.gif" width="260">
+      <img src="media/bc30_framestack.gif" width="260">
+    </p>
+    <p align="center"><sub>Left: <code>bc29</code> (residual-action). Right: <code>bc30</code> (frame-stacked wrist). Both real misses, both below champion <code>bc21</code>.</sub></p>
+
+    **Minor methodological footnote, caught while generating these GIFs**: `demo_stage5_rl_failure.py --seed 22` on `bc29` gave a DIFFERENT rollout than eval trial 22 of the same checkpoint's 40-trial sweep (`eval_policy.py`'s trial loop), even though both call `env.reset(seed=22)` on a policy run deterministically. Root cause: `GraspPixelEnv.reset()` explicitly re-seeds `qpos`/`qvel`/the object pose, but never calls `mj.mj_resetData` -- MuJoCo's contact-solver warm-start state (`qacc_warmstart` etc.) carries over from whichever episode ran immediately before it in the same process. A freshly-started process's trial 0 is unaffected (confirmed: `bc30` seed 0 via the demo script exactly matched its eval log's trial 0), but trial N>0 within a sequential sweep is quietly conditioned on trial N-1's leftover solver state. **This does NOT affect any success-count comparison in this README** -- every `success=N/40` number was produced by the identical sequential-trial methodology every time, so A/B comparisons between checkpoints remain apples-to-apples. It only means a GIF rendered in isolation for "seed N" illustrates that checkpoint's behavior on that seed, not a bit-exact replay of trial N's logged row in a 40-trial sweep.
+
+    **Conclusion: none of the three single-shot attempts beat `bc21`.** This is now seven
+    independent structural/data interventions (items 29's capacity/early-stop tests plus this
+    item's recipe/residual/frame-stack tests, on top of items 25-27's plateau-confirmation
+    rounds) that all land at or below the champion. `bc21` is a genuinely robust local optimum
+    against everything tried so far by changing ONE thing at a time from its own recipe/data.
+
+    **Not yet discussed with the user**: none of (a)/(b)/(c) were hyperparameter-tuned -- each
+    was a single untuned attempt, same as items 29's capacity test. A real test of residual
+    learning or frame-stacking would sweep their own hyperparameters (e.g. whether the residual
+    baseline should be computed per-timestep vs. per-phase, or whether stacking 3+ frames rather
+    than 2 helps) rather than dropping them in with `bc21`'s unrelated recipe and calling it
+    negative after one shot. Also untried: combining two interventions at once (e.g.
+    frame-stacking ON TOP OF a fresh DAgger round, not just on `bc21`'s existing data).
+
 ## Repository layout
 
 ```
@@ -1480,6 +1548,10 @@ panda_vision_grasp/
 ├── train_bc_holdweight.py            # Stage 5: BC with hold-phase-reweighted action MSE
 ├── train_bc2.py                      # Stage 5: BC v2 -- net-arch/hyperparam control, train/val split, item 29
 ├── dagger_loop.py                    # Stage 5: automated iterative DAgger loop, item 30
+├── train_bc_residual.py              # Stage 5: BC on residual (action - per-timestep mean) targets, item 31
+├── residual_utils.py                 # Stage 5: loads/applies a residual checkpoint's mean_action.npy, item 31
+├── framestack_env.py                 # Stage 5: frame-stacked-wrist-camera env wrapper + offline stacking, item 31
+├── train_bc_framestack.py            # Stage 5: BC with a frame-stacked (64x64x6) wrist camera, item 31
 ├── train_bc_chunked.py               # Stage 5: standalone action-chunking BC (not SB3-based)
 ├── eval_policy_chunked.py            # Stage 5: 20-trial eval for a chunked-BC checkpoint
 ├── demo_chunked.py                   # Stage 5: renders a chunked-BC policy's rollout
@@ -1494,7 +1566,7 @@ panda_vision_grasp/
 │   └── bc01-bc08.gif, bc02-08_best_case.gif, bc09_worst_yaw.gif, bc13_success.gif,
 │       bc15_best.gif, bc15_nolatch.gif, bc15_latch.gif, bc18_holdweight.gif, bc19-20.gif,
 │       bc19-20_best_case.gif, bc22_capacity.gif, bc23_earlystop.gif, bc25_loop_round1.gif,
-│       bc26_plateau_round2.gif,
+│       bc26_plateau_round2.gif, bc29_residual.gif, bc30_framestack.gif,
 │       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp_height_comparison.png,
 │       yaw_alignment_comparison.png
 ├── requirements.txt

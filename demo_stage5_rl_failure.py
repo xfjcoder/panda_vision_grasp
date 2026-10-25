@@ -20,7 +20,9 @@ from PIL import Image
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+from framestack_env import FrameStackWristEnv
 from grasp_env import EPISODE_STEPS, GraspPixelEnv, N_ARM
+from residual_utils import load_mean_action
 
 
 def main():
@@ -43,21 +45,26 @@ def main():
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
     policy = PPO.load(run_dir / "checkpoints" / "final")
+    mean_action = load_mean_action(run_dir)
     env = GraspPixelEnv()
+    if policy.observation_space["wrist_image"].shape[0] == 6:
+        env = FrameStackWristEnv(env)  # item 31: trained against a stacked-wrist checkpoint
     vec_env = DummyVecEnv([lambda: env])
     norm_env = VecNormalize.load(str(run_dir / "checkpoints" / "vecnormalize_final.pkl"), vec_env)
     norm_env.training = False
     norm_env.norm_reward = False
 
-    workspace_renderer = mj.Renderer(env.model, height=480, width=640)
-    wrist_renderer = mj.Renderer(env.model, height=480, width=480) if args.dual_view else None
+    sim = env.unwrapped  # item 31: FrameStackWristEnv wraps GraspPixelEnv without forwarding
+                          # mujoco model/data attributes -- reach through to the real sim.
+    workspace_renderer = mj.Renderer(sim.model, height=480, width=640)
+    wrist_renderer = mj.Renderer(sim.model, height=480, width=480) if args.dual_view else None
     frames = []
 
     def render():
-        workspace_renderer.update_scene(env.data, camera="workspace_cam")
+        workspace_renderer.update_scene(sim.data, camera="workspace_cam")
         frame = workspace_renderer.render().copy()
         if wrist_renderer is not None:
-            wrist_renderer.update_scene(env.data, camera="wrist_cam")
+            wrist_renderer.update_scene(sim.data, camera="wrist_cam")
             wrist_frame = wrist_renderer.render().copy()
             frame = np.concatenate([frame, wrist_frame], axis=1)
         frames.append(frame)
@@ -70,6 +77,8 @@ def main():
     for t in range(EPISODE_STEPS):
         obs_norm = norm_env.normalize_obs(obs)
         action, _ = policy.predict(obs_norm, deterministic=True)
+        if mean_action is not None:
+            action = action + mean_action[t]
         if args.gripper_latch_delay >= 0:
             g = obs["proprio"][-1]
             if g > 0.9:

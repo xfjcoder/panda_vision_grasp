@@ -42,7 +42,9 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from collect_demos import build_scripted_targets, gripper_to_action
+from framestack_env import FrameStackWristEnv
 from grasp_env import EPISODE_STEPS, GraspPixelEnv, MAX_JOINT_RATE, N_ARM
+from residual_utils import load_mean_action
 
 CORRECTION_CAP = 0.15  # ~5x bc01's mean|action| of 0.031 -- enough to correct meaningfully
                         # faster than smooth demo motion, far short of a full-rate snap
@@ -76,7 +78,13 @@ def main():
 
     run_dir = f"runs/{args.run_name}"
     policy = PPO.load(f"{run_dir}/checkpoints/final")
+    mean_action = load_mean_action(run_dir)
     env = GraspPixelEnv(curriculum_scale=1.0)
+    sim = env  # keeps a direct reference for q_target/obj_pos0/model -- FrameStackWristEnv
+               # doesn't forward those attributes (see demo_stage5_rl_failure.py's same fix)
+    is_framestacked = policy.observation_space["wrist_image"].shape[0] == 6
+    if is_framestacked:
+        env = FrameStackWristEnv(env)  # item 31: trained against a stacked-wrist checkpoint
     vec_env = DummyVecEnv([lambda: env])
     norm_env = VecNormalize.load(f"{run_dir}/checkpoints/vecnormalize_final.pkl", vec_env)
     norm_env.training = False
@@ -87,9 +95,9 @@ def main():
 
     for ep in range(args.episodes):
         obs, _ = env.reset(seed=args.seed_offset + ep)
-        q_pregrasp = env.q_target.copy()
-        obj_pos0 = env.obj_pos0.copy()
-        ideal_targets = build_scripted_targets(env.model, q_pregrasp, obj_pos0)
+        q_pregrasp = sim.q_target.copy()
+        obj_pos0 = sim.obj_pos0.copy()
+        ideal_targets = build_scripted_targets(sim.model, q_pregrasp, obj_pos0)
 
         actual_q_target = q_pregrasp.copy()
         info = {}
@@ -102,12 +110,17 @@ def main():
             expert_action = np.concatenate([delta, [gripper_to_action(ideal_g)]]).astype(np.float32)
 
             images.append(obs["image"])
-            wrist_images.append(obs["wrist_image"])
+            # Always store the single CURRENT-frame wrist image, even when is_framestacked --
+            # downstream files (train_bc2.py etc.) all expect plain 3-channel wrist_images, and
+            # stacking is always re-derivable offline (stack_wrist_offline) from this.
+            wrist_images.append(obs["wrist_image"][..., -3:] if is_framestacked else obs["wrist_image"])
             proprios.append(obs["proprio"])
             actions.append(expert_action)
 
             obs_norm = norm_env.normalize_obs(obs)
             learner_action, _ = policy.predict(obs_norm, deterministic=True)
+            if mean_action is not None:
+                learner_action = learner_action + mean_action[t]
             learner_action = np.clip(learner_action, -1.0, 1.0)
             if args.gripper_latch_delay >= 0:
                 g = obs["proprio"][-1]
@@ -118,7 +131,7 @@ def main():
                 if close_start is not None and t >= close_start + args.gripper_latch_delay:
                     learner_action[N_ARM] = -1.0
             obs, reward, terminated, truncated, info = env.step(learner_action)
-            actual_q_target = env.q_target.copy()
+            actual_q_target = sim.q_target.copy()
             if terminated or truncated:
                 break
         n_would_succeed += int(info["success"])
