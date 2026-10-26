@@ -1731,16 +1731,70 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     <code>grasp17</code> (constant bc_coef, 20k steps, right) -- both genuine successes at this
     investigation's new best, 8/40.</sub></p>
 
-    **Conclusion: the DAPG-style auxiliary BC loss (#1) works, and is now the best RL-fine-tune
-    lever found in this entire investigation -- 8/40 peak, 5.4/40 average (constant `bc_coef`),
-    up from 5/40 peak with the std sweep/plateau check alone.** It still falls short of champion
-    `bc21`'s 11/40 BC-only result, so RL fine-tuning still isn't a win over plain imitation for
-    this task, but the gap closed substantially (11-8=3, vs. the std-only recipe's 11-5=6) and
-    the mechanism (nothing pulling gradients back toward the demos) is now directly confirmed by
-    the fix actually working. Next if pursued further: either sweep `bc_coef`'s magnitude higher
-    (constant, no decay) to see if the gap closes more, or move to the structurally different
-    directions (#3 state-conditioned residual, #4 generative BC heads) per the user's own
-    stated fallback order.
+    **Conclusion (at this point): the DAPG-style auxiliary BC loss (#1) works, and is now the
+    best RL-fine-tune lever found in this entire investigation -- 8/40 peak, 5.4/40 average
+    (constant `bc_coef`), up from 5/40 peak with the std sweep/plateau check alone.** Still short
+    of champion `bc21`'s 11/40. (Superseded below -- sweeping `bc_coef` higher closed the gap
+    completely at one checkpoint.)
+
+    **Reference anchor, not previously measured: `bc21_stdfix003` evaluated standalone (zero PPO
+    fine-tune steps).** Since eval always uses `deterministic=True`, std (which is all that
+    `bc21_stdfix003` changes vs `bc21`) has no effect on eval -- confirmed: 11/40, reward
+    -0.2026, identical to `bc21`'s own number. This is the ceiling a very large `bc_coef` should
+    approach (infinite `bc_coef` => fine-tuning can't move the policy's mean-action weights at
+    all, degenerating to this exact baseline).
+
+    **User: "sweep bc_coef's magnitude higher (still constant) to try to close the remaining
+    3-success gap."** At `bc_coef=1.0` (`grasp17`) the BC term was only ~0.01 of total loss
+    (value_loss alone was ~0.3-0.5) -- genuinely weak in absolute terms, so swept geometrically
+    higher: `grasp18` (3.0), `grasp19` (10.0), `grasp20` (30.0), same recipe otherwise (resumed
+    from `bc21_stdfix003`, 200k steps, checkpoint every 20k).
+
+    | bc_coef | 20k | 40k | 60k | 80k | 100k | 120k | 140k | 160k | 180k | 200k | peak | avg |
+    |---|---|---|---|---|---|---|---|---|---|---|---|---|
+    | 1 (`grasp17`) | 8 | 7 | 3 | 4 | 7 | 5 | 6 | 4 | 4 | 6 | 8 | 5.4 |
+    | 3 (`grasp18`) | 9 | 5 | 4 | 4 | 4 | 5 | 3 | 4 | 3 | 1 | 9 | 4.2 |
+    | 10 (`grasp19`) | 8 | 5 | 6 | 7 | 3 | 1 | 3 | 4 | 3 | 1 | 8 | 4.1 |
+    | 30 (`grasp20`) | 8 | **11** | 4 | 5 | 6 | 4 | 5 | 4 | 4 | 6 | **11** | **5.7** |
+
+    **`grasp20`@40k ties champion `bc21`'s 11/40 exactly, with a better mean reward (-0.1553 vs
+    `bc21`'s -0.2026).** Checked directly whether this is a real behavior change or the policy
+    just not having moved at all under such heavy BC regularization: compared the per-seed
+    success sets. They're NOT identical -- `grasp20`@40k lost 2 of `bc21`'s successes (seeds 9,
+    13) but gained 2 different ones (seeds 3, 5), net count tied. A genuinely different policy
+    that happens to match the champion's count, not a frozen copy.
+
+    The sweep itself is non-monotonic in both peak and average (peak: 8/9/8/11 for coef
+    1/3/10/30; average: 5.4/4.2/4.1/5.7) -- the same dose-response shape as every other
+    weight/threshold swept in this project, not a "turn it up more" trend. All four runs share
+    one instability pattern worth flagging: every curve has at least one late-training checkpoint
+    (160k-200k) noticeably worse than its own early peak (`grasp18`/`grasp19` end at 1/40; even
+    `grasp20`, the best average, dips to 4/40 repeatedly) -- more training steps at a fixed
+    `bc_coef` doesn't reliably sustain a good checkpoint once found, matching item 32's earlier
+    plateau-check finding that more compute alone doesn't help this recipe.
+
+    <p align="center">
+      <img src="media/grasp20_bcaux_coef30_best.gif" width="280">
+    </p>
+    <p align="center"><sub><code>grasp20</code> (bc_coef=30, 40k steps) -- ties champion
+    `bc21`'s 11/40, via a genuinely different policy (2 seeds lost, 2 different ones
+    gained).</sub></p>
+
+    **Conclusion: sweeping `bc_coef` higher closed the remaining gap -- `grasp20` (bc_coef=30,
+    40k steps) reaches 11/40, matching champion `bc21` exactly, with a slightly better mean
+    reward.** This is the first RL-fine-tune result in the entire investigation (log_std fix,
+    std sweep, extended-training plateau check, bc_coef sweep) to reach parity with pure BC. It
+    comes with real caveats, though: it's one checkpoint out of 40 evaluated across this sweep,
+    sitting in a run that's otherwise noisy and unstable late in training (same as every other
+    `bc_coef` value tried) -- not evidence that `bc_coef=30` reliably beats `bc21`, just that
+    this specific lever can reach parity under the right (currently somewhat lucky-looking)
+    stopping point. If pursued further: repeat `grasp20`'s exact recipe with a different seed to
+    see if 11/40-or-better reproduces, since the one existing data point doesn't yet distinguish
+    "a real improvement at this `bc_coef`" from "landed well in the same noisy band this whole
+    sweep has shown." Otherwise, this closes out the RL-fine-tuning lever at a genuinely
+    positive result (parity, not a clear win) -- the remaining untried directions (#3
+    state-conditioned residual, #4 generative BC heads) still attack a structurally different
+    axis, not more of the same recipe.
 
 ## Repository layout
 
@@ -1788,7 +1842,8 @@ panda_vision_grasp/
 │       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp09_stdcollapse.gif,
 │       grasp10_stdfixed.gif, grasp11_std003.gif, grasp12_std001.gif, grasp13_std005.gif,
 │       grasp14_std002.gif, grasp15_plateau_best.gif, grasp16_bcaux_best.gif,
-│       grasp17_bcaux_const_best.gif, yaw_alignment_comparison.png
+│       grasp17_bcaux_const_best.gif, grasp20_bcaux_coef30_best.gif,
+│       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
