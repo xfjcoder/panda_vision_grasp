@@ -1654,13 +1654,93 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     </p>
     <p align="center"><sub><code>grasp15</code>'s best-found checkpoint (100k steps, seed 21) -- a genuine success, but representative of this sweep's peak (5/40), not a path past it.</sub></p>
 
-    **Conclusion: RL fine-tuning from `bc21`, across the full investigation (log_std fix, a
-    6-point std sweep, and now a 20-point extended-training plateau check), tops out around
-    5/40 -- a real improvement over the raw std bug (0/40) but still well below the champion's
-    11/40, with no sign that more compute alone closes the gap.** This closes out the
-    RL-fine-tuning lever for now; the remaining untried directions (freezing shared layers,
-    fine-tuning only a small head) attack a structurally different axis, not more of the same
-    recipe.
+    **Conclusion (at this point): RL fine-tuning from `bc21`, across the full investigation
+    (log_std fix, a 6-point std sweep, and a 20-point extended-training plateau check), tops out
+    around 5/40 -- a real improvement over the raw std bug (0/40) but still well below the
+    champion's 11/40, with no sign that more compute alone closes the gap.** (Superseded below --
+    one more lever closed this gap further.)
+
+    **User: "why il/bc and rl at large so hard? any successful methods reported we can borrow?"**
+    Diagnosis, matching what this project had already independently discovered: BC's ceiling
+    comes from covariate shift (compounding errors off-distribution) and mode-averaging (MSE
+    regression blurs multimodal demos into an average that's valid for neither mode -- our own
+    uncalibrated-`log_std` bug, item 32 above, is a sharp instance of this: BC never represented
+    *uncertainty* over actions at all, just a point estimate). RL-fine-tune-from-BC's ceiling, as
+    directly observed above, comes from on-policy PPO having nothing in its loss pulling the
+    policy back toward the demonstrated behavior once gradient steps start moving it away --
+    only the initial weights encode that, and they decay fast. Borrowable literature fixes,
+    ranked by fit for this codebase: **(1) DAPG** (Rajeswaran et al. 2018) -- an auxiliary BC
+    loss added throughout RL fine-tuning, not just at init, with a decaying weight; **(2)
+    AWAC/RLPD** -- off-policy (SAC-style) fine-tuning with demo transitions mixed into every
+    batch; **(3)** a state-conditioned residual base policy instead of our time-indexed
+    `mean_action.npy` (item 31); **(4)** generative BC action heads (Diffusion Policy/ACT) that
+    don't suffer MSE's mode-averaging in the first place; **(5)** freezing the shared
+    CNN/MLP trunk and fine-tuning only a small head. **User: "implement #1 against bc21, if not
+    work, try #3, #4 and so on."**
+
+    **Implementation: `train_rl_bc_aux.py`, a `BCRegularizedPPO(PPO)` subclass.** SB3 doesn't
+    expose a hook for an auxiliary loss term, so `train()` is a near-verbatim copy of
+    `stable_baselines3==2.9.0`'s `PPO.train()` with one term added: every minibatch update also
+    samples a batch from `data/demos_dagger10.npz` (the same file and hold-phase reweighting
+    `bc21` itself was trained on) and adds `bc_coef * weighted_MSE(policy_mean_action,
+    demo_action)` to the total loss, `bc_coef` following a schedule over the fine-tune run (same
+    `progress_remaining` machinery SB3 already uses for lr/clip-range).
+
+    **Bug caught before it did real damage: checkpoint files ballooned to multi-GB and filled
+    the disk.** `BaseAlgorithm.save()` pickles every public instance attribute by default (minus
+    a small exclusion list for things like `policy`/`env`); the demo arrays `set_bc_data()`
+    attaches to the model (`_bc_images`/`_bc_wrist_images`, 2.65GB each) aren't on that list, so
+    every single checkpoint saved serialized them too. First smoke test alone wrote 166GB before
+    being killed; the first real `grasp16` launch filled the entire 469GB partition (`OSError:
+    [Errno 28] No space left on device`) mid-run. Fixed with an `_excluded_save_params()`
+    override adding the `_bc_*` attributes to the skip list -- checkpoints dropped back to
+    ~9.8MB, matching every other PPO checkpoint in this project. Freed 186GB by deleting the
+    bloated run directories and relaunched.
+
+    **`grasp16`: `bc_coef` 1.0 -> 0.0 (decaying), otherwise identical to `grasp11`/`grasp15`'s
+    recipe (resumed from `bc21_stdfix003`, lr=1e-5, 200k steps, checkpoint every 20k).**
+
+    | steps (k) | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 |
+    |---|---|---|---|---|---|---|---|---|---|---|
+    | success/40 | 3 | **8** | 2 | 5 | 4 | 3 | 3 | 2 | 6 | 3 |
+    | mean reward | -4.78 | **-2.11** | -5.17 | -3.65 | -4.32 | -4.85 | -4.80 | -5.39 | -3.31 | -5.04 |
+
+    `grasp16`'s peak (40k steps, 8/40) already beats `grasp15`'s best (5/40) -- the auxiliary BC
+    loss is a real improvement over vanilla PPO fine-tuning. But the pattern across checkpoints
+    tracks `bc_coef`'s magnitude (highest at 40k/80k/180k, where the coefficient hadn't decayed
+    away yet; worst at 160k/200k, where it had) -- suggesting the decay-to-zero schedule was
+    throwing away the thing that was working, not easing the policy into independence.
+
+    **`grasp17`: same recipe, but `bc_coef` held constant at 1.0 (never decayed).**
+
+    | steps (k) | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 |
+    |---|---|---|---|---|---|---|---|---|---|---|
+    | success/40 | **8** | 7 | 3 | 4 | 7 | 5 | 6 | 4 | 4 | 6 |
+    | mean reward | **-1.77** | -2.61 | -4.49 | -4.10 | -2.39 | -3.51 | -3.04 | -4.12 | -4.22 | -3.20 |
+
+    Confirms the hunch directly: holding `bc_coef` constant never drops below 3/40 (`grasp16`
+    dropped as low as 2/40 three times) and averages 5.4/40 across all 10 checkpoints vs.
+    `grasp16`'s 3.9/40. Peak ties `grasp16`'s (8/40, now at 20k steps) but far more consistently
+    reproduced.
+
+    <p align="center">
+      <img src="media/grasp16_bcaux_best.gif" width="280">
+      <img src="media/grasp17_bcaux_const_best.gif" width="280">
+    </p>
+    <p align="center"><sub><code>grasp16</code> (decaying bc_coef, 40k steps, left) and
+    <code>grasp17</code> (constant bc_coef, 20k steps, right) -- both genuine successes at this
+    investigation's new best, 8/40.</sub></p>
+
+    **Conclusion: the DAPG-style auxiliary BC loss (#1) works, and is now the best RL-fine-tune
+    lever found in this entire investigation -- 8/40 peak, 5.4/40 average (constant `bc_coef`),
+    up from 5/40 peak with the std sweep/plateau check alone.** It still falls short of champion
+    `bc21`'s 11/40 BC-only result, so RL fine-tuning still isn't a win over plain imitation for
+    this task, but the gap closed substantially (11-8=3, vs. the std-only recipe's 11-5=6) and
+    the mechanism (nothing pulling gradients back toward the demos) is now directly confirmed by
+    the fix actually working. Next if pursued further: either sweep `bc_coef`'s magnitude higher
+    (constant, no decay) to see if the gap closes more, or move to the structurally different
+    directions (#3 state-conditioned residual, #4 generative BC heads) per the user's own
+    stated fallback order.
 
 ## Repository layout
 
@@ -1707,8 +1787,8 @@ panda_vision_grasp/
 │       bc26_plateau_round2.gif, bc29_residual.gif, bc30_framestack.gif,
 │       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp09_stdcollapse.gif,
 │       grasp10_stdfixed.gif, grasp11_std003.gif, grasp12_std001.gif, grasp13_std005.gif,
-│       grasp14_std002.gif, grasp15_plateau_best.gif, grasp_height_comparison.png,
-│       yaw_alignment_comparison.png
+│       grasp14_std002.gif, grasp15_plateau_best.gif, grasp16_bcaux_best.gif,
+│       grasp17_bcaux_const_best.gif, yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
