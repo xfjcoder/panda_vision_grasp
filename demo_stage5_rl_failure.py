@@ -30,6 +30,12 @@ def main():
     ap.add_argument("--run-name", type=str, required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--record", type=str, default=None)
+    ap.add_argument("--steps", type=int, default=None,
+                     help="Render an intermediate CheckpointCallback snapshot "
+                          "(checkpoints/ppo_<steps>_steps.zip + "
+                          "ppo_vecnormalize_<steps>_steps.pkl) instead of the default "
+                          "final/vecnormalize_final.pkl -- same convention as "
+                          "eval_policy.py's --steps.")
     ap.add_argument("--dual-view", action="store_true",
                      help="Also render wrist_cam (eye-in-hand) side by side with workspace_cam. "
                           "Visualization only -- the policy never sees this view.")
@@ -44,13 +50,19 @@ def main():
     args = ap.parse_args()
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
-    policy = PPO.load(run_dir / "checkpoints" / "final")
+    if args.steps is not None:
+        model_stem = f"ppo_{args.steps}_steps"
+        vecnorm_name = f"ppo_vecnormalize_{args.steps}_steps.pkl"
+    else:
+        model_stem = "final"
+        vecnorm_name = "vecnormalize_final.pkl"
+    policy = PPO.load(run_dir / "checkpoints" / model_stem)
     mean_action = load_mean_action(run_dir)
     env = GraspPixelEnv()
     if policy.observation_space["wrist_image"].shape[0] == 6:
         env = FrameStackWristEnv(env)  # item 31: trained against a stacked-wrist checkpoint
     vec_env = DummyVecEnv([lambda: env])
-    norm_env = VecNormalize.load(str(run_dir / "checkpoints" / "vecnormalize_final.pkl"), vec_env)
+    norm_env = VecNormalize.load(str(run_dir / "checkpoints" / vecnorm_name), vec_env)
     norm_env.training = False
     norm_env.norm_reward = False
 

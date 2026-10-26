@@ -1616,6 +1616,52 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     (rather than only before/after) to see whether an even better checkpoint existed mid-run
     before the policy settled at its final values.
 
+    **User: "evaluating checkpoints every 20k steps till reach plateau."** Added
+    `--checkpoint-freq` to `train.py` (a fixed, `--timesteps`-independent save cadence -- the
+    old formula spaced out 10 checkpoints over whatever total budget was given, too coarse for
+    a long run) and `--steps` to `eval_policy.py`/`demo_stage5_rl_failure.py` (evaluate/render
+    any intermediate `ppo_<N>_steps.zip` snapshot, not just the final one). Launched `grasp15`:
+    resumed from the std=0.03 peak (`bc21_stdfix003`), same `lr=1e-5`/`ent_coef=0` recipe, but
+    400k steps (2x `grasp11`'s budget) with a checkpoint every 20k -- 20 snapshots total, each
+    evaluated under the standard 40-trial protocol.
+
+    **One operational hiccup, not a real bug**: running two eval batches concurrently against
+    the tail of still-finishing training crashed one eval (`steps=180000`, a low-level
+    segfault-style stack trace, no Python traceback) -- re-running it alone once the load eased
+    succeeded cleanly (2/40, consistent with its neighbors). Resource contention, not a
+    reproducible issue with the checkpoint itself.
+
+    **Result: no plateau above the already-known peak -- a noisy oscillation, not a trend.**
+
+    | steps (k) | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 | 220 | 240 | 260 | 280 | 300 | 320 | 340 | 360 | 380 | 400 |
+    |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+    | success/40 | 4 | 3 | 4 | 5 | 5 | 5 | 4 | 4 | 2 | 2 | 1 | 2 | 5 | 3 | 4 | 5 | 5 | 5 | 4 | 4 |
+    | mean reward | -3.74 | -4.26 | -3.58 | -3.21 | -3.14 | -3.30 | -4.07 | -3.98 | -5.03 | -5.04 | -5.55 | -4.91 | -3.53 | -4.51 | -4.12 | -3.44 | -3.66 | -3.73 | -4.06 | -4.19 |
+
+    Success bounces between 1/40 and 5/40 for the entire 400k-step budget, with a real dip
+    (180k-240k: 1-2/40) in the middle, not a monotonic climb that happened to get cut off at
+    200k. **The genuine best-found checkpoint across this whole sweep is 5/40 (ties at
+    80k/100k/120k/260k/320k/340k/360k) -- slightly better than `grasp11`'s own reported 4/40,
+    but that's two different stochastic training runs from the identical starting checkpoint
+    landing in different parts of the same noisy band, not evidence of a real improvement
+    trend.** Confirms directly what the flat `ep_rew_mean` training-log curves already
+    suggested back at item 32's std sweep: this configuration isn't slowly climbing toward
+    `bc21` and just needs more steps -- it's stuck oscillating in a band that peaks around
+    5/40, well short of champion `bc21`'s 11/40, for as long as this recipe keeps running.
+
+    <p align="center">
+      <img src="media/grasp15_plateau_best.gif" width="280">
+    </p>
+    <p align="center"><sub><code>grasp15</code>'s best-found checkpoint (100k steps, seed 21) -- a genuine success, but representative of this sweep's peak (5/40), not a path past it.</sub></p>
+
+    **Conclusion: RL fine-tuning from `bc21`, across the full investigation (log_std fix, a
+    6-point std sweep, and now a 20-point extended-training plateau check), tops out around
+    5/40 -- a real improvement over the raw std bug (0/40) but still well below the champion's
+    11/40, with no sign that more compute alone closes the gap.** This closes out the
+    RL-fine-tuning lever for now; the remaining untried directions (freezing shared layers,
+    fine-tuning only a small head) attack a structurally different axis, not more of the same
+    recipe.
+
 ## Repository layout
 
 ```
@@ -1661,7 +1707,8 @@ panda_vision_grasp/
 │       bc26_plateau_round2.gif, bc29_residual.gif, bc30_framestack.gif,
 │       bc05_chunked.gif, bc06_chunked.gif, grasp01-08.gif, grasp09_stdcollapse.gif,
 │       grasp10_stdfixed.gif, grasp11_std003.gif, grasp12_std001.gif, grasp13_std005.gif,
-│       grasp14_std002.gif, grasp_height_comparison.png, yaw_alignment_comparison.png
+│       grasp14_std002.gif, grasp15_plateau_best.gif, grasp_height_comparison.png,
+│       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```

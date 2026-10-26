@@ -86,6 +86,12 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", type=str, default=None)
     ap.add_argument("--resume-vecnormalize", type=str, default=None)
+    ap.add_argument("--checkpoint-freq", type=int, default=None,
+                     help="Save a checkpoint (model + vecnormalize) every this many raw "
+                          "timesteps, regardless of --timesteps. Default None reproduces the "
+                          "old behavior (10 checkpoints total, spacing scales with --timesteps) "
+                          "-- set this explicitly (e.g. 20000) for a long run where you want a "
+                          "fixed, timesteps-independent cadence to evaluate a plateau curve.")
     args = ap.parse_args()
 
     run_dir = HERE / "runs" / args.run_name
@@ -131,8 +137,12 @@ def main():
             verbose=1,
         )
 
+    if args.checkpoint_freq is not None:
+        save_freq = max(args.checkpoint_freq // args.n_envs, 1)
+    else:
+        save_freq = max(args.timesteps // (args.n_envs * 10), 1)
     checkpoint_cb = CheckpointCallback(
-        save_freq=max(args.timesteps // (args.n_envs * 10), 1),
+        save_freq=save_freq,
         save_path=str(run_dir / "checkpoints"),
         name_prefix="ppo",
         save_vecnormalize=True,

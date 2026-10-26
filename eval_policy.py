@@ -22,6 +22,12 @@ def main():
     ap.add_argument("--run-name", type=str, required=True)
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--base-seed", type=int, default=0)
+    ap.add_argument("--steps", type=int, default=None,
+                     help="Evaluate an intermediate CheckpointCallback snapshot "
+                          "(checkpoints/ppo_<steps>_steps.zip + "
+                          "ppo_vecnormalize_<steps>_steps.pkl) instead of the default "
+                          "final/vecnormalize_final.pkl -- for plotting a plateau curve "
+                          "across a single long training run's saved checkpoints.")
     ap.add_argument("--gripper-latch-delay", type=int, default=5,
                      help="Once proprio's gripper_qpos confirms a close (crosses below 0.75 "
                           "after having been open) and this many MORE steps have passed, "
@@ -41,13 +47,19 @@ def main():
     args = ap.parse_args()
 
     run_dir = Path(__file__).parent / "runs" / args.run_name
-    policy = PPO.load(run_dir / "checkpoints" / "final")
+    if args.steps is not None:
+        model_stem = f"ppo_{args.steps}_steps"
+        vecnorm_name = f"ppo_vecnormalize_{args.steps}_steps.pkl"
+    else:
+        model_stem = "final"
+        vecnorm_name = "vecnormalize_final.pkl"
+    policy = PPO.load(run_dir / "checkpoints" / model_stem)
     mean_action = load_mean_action(run_dir)
     env = GraspPixelEnv()
     if policy.observation_space["wrist_image"].shape[0] == 6:
         env = FrameStackWristEnv(env)  # item 31: trained against a stacked-wrist checkpoint
     vec_env = DummyVecEnv([lambda: env])
-    norm_env = VecNormalize.load(str(run_dir / "checkpoints" / "vecnormalize_final.pkl"), vec_env)
+    norm_env = VecNormalize.load(str(run_dir / "checkpoints" / vecnorm_name), vec_env)
     norm_env.training = False
     norm_env.norm_reward = False
 
