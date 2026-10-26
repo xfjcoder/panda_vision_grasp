@@ -253,7 +253,7 @@ def main():
         print(f"n_steps*n_envs not divisible by batch_size, using batch_size={batch_size}")
 
     model = BCRegularizedPPO.load(args.resume, env=env, device="cpu", verbose=1,
-                                   learning_rate=linear_schedule(args.lr))
+                                   learning_rate=linear_schedule(args.lr), seed=args.seed)
     print(f"resumed from {args.resume}")
     model.set_bc_data(args.demos, args.hold_weight, args.bc_coef_init, args.bc_coef_final,
                        args.bc_batch_size)

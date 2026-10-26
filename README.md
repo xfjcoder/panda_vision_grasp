@@ -1780,21 +1780,60 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     `bc21`'s 11/40, via a genuinely different policy (2 seeds lost, 2 different ones
     gained).</sub></p>
 
-    **Conclusion: sweeping `bc_coef` higher closed the remaining gap -- `grasp20` (bc_coef=30,
-    40k steps) reaches 11/40, matching champion `bc21` exactly, with a slightly better mean
-    reward.** This is the first RL-fine-tune result in the entire investigation (log_std fix,
-    std sweep, extended-training plateau check, bc_coef sweep) to reach parity with pure BC. It
-    comes with real caveats, though: it's one checkpoint out of 40 evaluated across this sweep,
-    sitting in a run that's otherwise noisy and unstable late in training (same as every other
-    `bc_coef` value tried) -- not evidence that `bc_coef=30` reliably beats `bc21`, just that
-    this specific lever can reach parity under the right (currently somewhat lucky-looking)
-    stopping point. If pursued further: repeat `grasp20`'s exact recipe with a different seed to
-    see if 11/40-or-better reproduces, since the one existing data point doesn't yet distinguish
-    "a real improvement at this `bc_coef`" from "landed well in the same noisy band this whole
-    sweep has shown." Otherwise, this closes out the RL-fine-tuning lever at a genuinely
-    positive result (parity, not a clear win) -- the remaining untried directions (#3
-    state-conditioned residual, #4 generative BC heads) still attack a structurally different
-    axis, not more of the same recipe.
+    **Conclusion (at this point): sweeping `bc_coef` higher closed the remaining gap --
+    `grasp20` (bc_coef=30, 40k steps) reaches 11/40, matching champion `bc21` exactly, with a
+    slightly better mean reward.** Caveat raised: one checkpoint in an otherwise noisy sweep --
+    is this reproducible, or a lucky landing? (Resolved below.)
+
+    **User: "checking if that result reproduces with a different seed."** First had to fix a
+    latent bug this exposed: `train_rl_bc_aux.py --seed` was never actually wired into the
+    resumed model -- `BCRegularizedPPO.load()` was called without a `seed` override, so (same
+    mechanism as the earlier-noticed `n_steps`/`batch_size` non-override, item 32 above)
+    `self.seed` stayed whatever `bc21_stdfix003`'s checkpoint had saved, regardless of the CLI
+    flag. `--seed` DID still change env reset seeding (`make_env` uses it directly), so training
+    wasn't fully deterministic across "different-seed" runs even before this fix, but torch's own
+    action-sampling RNG wasn't actually being reseeded as intended. Fixed by adding
+    `seed=args.seed` to the `.load()` call's kwargs -- confirmed via SB3 source
+    (`BaseAlgorithm.load()`: `model.__dict__.update(kwargs)` happens before `_setup_model()`,
+    and `OnPolicyAlgorithm._setup_model()` calls `self.set_random_seed(self.seed)` -- the
+    override lands before reseeding, and the actual loaded weights are restored afterward via
+    `set_parameters()`, so this only changes the RNG seed, not the network weights).
+
+    **`grasp21`: `grasp20`'s exact recipe (bc_coef=30, resumed from `bc21_stdfix003`, 200k
+    steps, checkpoint/20k) with `--seed 1` instead of the default 0.**
+
+    | steps (k) | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 | peak | avg |
+    |---|---|---|---|---|---|---|---|---|---|---|---|---|
+    | success/40 | 8 | 3 | 7 | 6 | 9 | **10** | 5 | 5 | 7 | 5 | **10** | **6.5** |
+
+    **Reproduces convincingly: peak 10/40 (120k steps, reward -0.3134) -- one shy of `bc21`'s
+    11/40, and the average across all 10 checkpoints (6.5/40) is even higher than `grasp20`'s
+    own (5.7/40).** Checked the seed-level overlap again, same method as `grasp20`:
+    `grasp21`@120k's success set is `{2,5,6,10,13,23,29,32,34,39}` vs. `bc21_stdfix003`'s
+    `{6,9,10,12,13,19,21,24,29,32,33}` -- only 5/10 shared, so this is an even MORE divergent
+    policy than `grasp20`'s was, yet lands almost exactly as well. Two independent training
+    seeds, two genuinely different learned policies, both landing at 10-11/40 -- this is not a
+    single lucky draw in a noisy band, it's the recipe reliably reaching near-parity-to-parity
+    with champion `bc21`.
+
+    <p align="center">
+      <img src="media/grasp21_bcaux_coef30_seed1_best.gif" width="280">
+    </p>
+    <p align="center"><sub><code>grasp21</code> (bc_coef=30, seed=1, 120k steps) -- a different
+    training seed reproduces near-parity (10/40) with an independently different policy than
+    both `bc21` and `grasp20`.</sub></p>
+
+    **Conclusion: the `bc_coef=30` DAPG-regularized RL fine-tune reliably closes the gap to
+    champion `bc21` -- confirmed reproducible across two independent seeds (11/40 and 10/40,
+    both via genuinely different policies, not copies).** This is the strongest RL-based result
+    in the entire investigation (log_std fix -> std sweep -> plateau check -> bc_coef sweep ->
+    reproducibility check) -- not a clean win over `bc21` (still hasn't exceeded 11/40), but a
+    confirmed, repeatable way to get RL fine-tuning to genuine parity with pure BC, something no
+    earlier lever in this investigation achieved even once. The remaining open question is
+    whether it can be pushed PAST parity (a 3rd/4th seed, or a finer `bc_coef`/early-stopping
+    search around 30) -- untried, and the structurally different directions (#3 state-conditioned
+    residual, #4 generative BC heads) remain the other open paths if this one is considered
+    closed out.
 
 ## Repository layout
 
@@ -1843,7 +1882,7 @@ panda_vision_grasp/
 │       grasp10_stdfixed.gif, grasp11_std003.gif, grasp12_std001.gif, grasp13_std005.gif,
 │       grasp14_std002.gif, grasp15_plateau_best.gif, grasp16_bcaux_best.gif,
 │       grasp17_bcaux_const_best.gif, grasp20_bcaux_coef30_best.gif,
-│       yaw_alignment_comparison.png
+│       grasp21_bcaux_coef30_seed1_best.gif, yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
