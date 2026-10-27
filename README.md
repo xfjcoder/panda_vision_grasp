@@ -1894,6 +1894,101 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     success. Levers #3 (state-conditioned residual) and #4 (generative BC heads) remain
     unexplored if a larger improvement is wanted later.
 
+33. **User: "let's go for levers #3 and #4" -- both implemented, both negative, both with a
+    clear, mechanistically-understood root cause rather than an unexplained miss.**
+
+    **Lever #3: residual RL (`residual_env.py`, `train_rl_residual.py`, `eval_policy_residual.py`,
+    `demo_residual.py`).** Architectural alternative to lever #1's loss-based anchoring: instead
+    of a DAPG loss pulling gradients back toward BC, `ResidualActionEnv` wraps `GraspPixelEnv` so
+    a fresh PPO policy's output is a small bounded correction (`residual_scale=0.15`) added to a
+    frozen `bc21` prediction, then clipped to `[-1, 1]` -- standard residual RL (Silver et al.
+    2018). Verified the wrapper is wired correctly before any training: zero residual exactly
+    reproduces `bc21`'s own success/failure on a known seed.
+
+    **`grasp24`: fresh PPO (not resumed from any checkpoint) atop frozen `bc21`, 200k steps,
+    `residual_scale=0.15`.**
+
+    | steps (k) | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 |
+    |---|---|---|---|---|---|---|---|---|---|---|
+    | success/40 | **5** | 4 | 2 | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
+    | mean reward | -3.71 | -5.19 | -7.41 | -8.01 | -8.76 | -9.57 | -10.12 | -10.11 | -10.35 | -10.38 |
+
+    Peaks early (20k, 5/40 -- below `bc21`'s 11/40, but a genuinely different policy, only 2 of
+    its 5 successful seeds overlap with `bc21`'s own 11) then degrades MONOTONICALLY to a total
+    collapse (0/40, from 120k onward) -- the same directional "more RL fine-tuning steps hurts
+    without active anchoring" pattern items 9-15 found for raw (non-residual) PPO fine-tuning,
+    just reaching a different (and still inferior) early peak. Traced the 200k collapse directly:
+    `drift` is EXACTLY 0.0000m across every seed checked (not just small -- the object is never
+    touched at all), while the raw residual output itself is substantial (mean |raw action|
+    0.42, scaled to roughly a real 0.06 contribution after `residual_scale`) -- enough,
+    accumulated over 120 steps with nothing pulling it back toward zero, to drift the arm's
+    trajectory entirely off the region `bc21`'s own path would visit. Bounding the action
+    SPACE (this lever) turned out not to be sufficient protection against the same sustained-
+    training degradation loss-based anchoring (lever #1) needed an explicit pull-back term to
+    avoid -- a real, informative negative result, not just "didn't work."
+
+    <p align="center">
+      <img src="media/grasp24_residual_best.gif" width="280">
+      <img src="media/grasp24_residual_collapsed.gif" width="280">
+    </p>
+    <p align="center"><sub><code>grasp24</code> at its peak (20k steps, left, 5/40) and after
+    collapse (200k steps, right, 0/40) -- residual RL protects against damage for a while, not
+    indefinitely.</sub></p>
+
+    **Lever #4: generative BC head (`train_bc_diffusion.py`, `eval_policy_diffusion.py`,
+    `demo_diffusion.py`).** A conditional DDPM over the action, replacing MSE mean-regression --
+    motivated by items 29/31's finding that mode-averaging is structural to MSE-against-a-point-
+    estimate, not fixable within that framework. Three attempts, same demo data/hold-weight
+    convention as `bc21` wherever applicable:
+
+    | checkpoint | variant | success | mean reward | root cause (diagnosed) |
+    |---|---|---|---|---|
+    | `bc31_diffusion` | per-step (chunk_size=1) | 1/40 | -13.78 | ~54% arm sign-flip rate step to step (vs. ~2% scripted baseline) -- independent noise resampled every control step, no temporal coherence |
+    | `bc32_diffusion_chunked` | chunked (size 10), hold_weight=1.5 | 0/40 | -23.59 | total conditioning collapse -- model predicts nearly the same output regardless of observation |
+    | `bc33_diffusion_chunked_noweight` | chunked (size 10), hold_weight=1.0 | 0/40 | -23.37 | same collapse, rules out hold_weight as the cause |
+
+    `bc31` first scored 1/40 even WITH item 28's gripper-latch-delay hack applied (added to
+    `eval_policy_diffusion.py`, previously missing) -- traced directly to the arm channels (not
+    just gripper) flipping sign on ~54% of consecutive steps, because every control step draws a
+    fresh, fully independent reverse-diffusion sample with nothing enforcing coherence with the
+    previous step's sample. This is why real Diffusion-Policy systems always pair a generative
+    head with action CHUNKING (one diffusion draw -> a whole coherent block, executed open-loop).
+    Rebuilt `DiffusionBCNet` to support `chunk_size` (flattening the denoiser's target to
+    `chunk_size * ACTION_DIM`, reusing `train_bc_chunked.py`'s `build_chunks`) -- `bc32` trained
+    with a much healthier loss curve (val tracking train down to 0.164, vs. the per-step
+    version's early-overfit-then-climb shape) but scored WORSE (0/40). Direct inspection (feeding
+    the trained model real demo observations from four very different points in an episode) found
+    the model predicts essentially the SAME output chunk regardless of input -- both the
+    near-binary gripper channel (always ~-1/closed, even fed the episode-start observation whose
+    true target is all +1/open) AND the continuous arm channels (predictions for the
+    pregrasp-height observation and the near-lift observation differ by <5% relative to their own
+    magnitude). Ruled out hold-phase reweighting amplifying the demo data's real 75/25
+    closed/open class imbalance as the cause (`bc33`, `hold_weight=1.0`, identical collapse).
+    Most likely cause, not fixed within this investigation: fixed-stride chunking collapses the
+    training set 10x (216k per-step transitions -> 21.6k chunk rows, one per `chunk_size`-stride
+    start), too few distinct images for this CNN encoder/training budget to learn robust
+    conditioning rather than defaulting to the (weighted) marginal action distribution.
+
+    <p align="center">
+      <img src="media/bc31_diffusion_fail.gif" width="220">
+      <img src="media/bc32_diffusion_chunked_fail.gif" width="220">
+      <img src="media/bc33_diffusion_chunked_noweight_fail.gif" width="220">
+    </p>
+    <p align="center"><sub>Left to right: <code>bc31</code> (per-step jitter), <code>bc32</code>
+    (chunked, conditioning collapse), <code>bc33</code> (chunked, no hold-weight -- same
+    collapse). All three below champion <code>bc21</code>.</sub></p>
+
+    **Conclusion: both structurally-different levers from the original 5-item borrowable-methods
+    list are now negative results, each with a real, traceable mechanism rather than an
+    unexplained miss.** Lever #3 shows that bounding the ACTION SPACE alone (without an explicit
+    pull-back term) delays but doesn't prevent RL fine-tuning degradation under sustained
+    training. Lever #4 shows that fixing per-step diffusion's temporal-incoherence problem via
+    chunking trades it for a conditioning-collapse problem from the resulting 10x-smaller
+    training set -- a real tradeoff this investigation's scope didn't resolve (denser/overlapping
+    chunk sampling, more epochs, or a stronger conditioning mechanism are the next things to try,
+    not attempted here). Lever #1 (`bc_coef=30` DAPG fine-tuning, item 32) remains this
+    investigation's only confirmed win over champion `bc21`.
+
 ## Repository layout
 
 ```
@@ -1925,6 +2020,14 @@ panda_vision_grasp/
 ├── train_bc_chunked.py               # Stage 5: standalone action-chunking BC (not SB3-based)
 ├── eval_policy_chunked.py            # Stage 5: 20-trial eval for a chunked-BC checkpoint
 ├── demo_chunked.py                   # Stage 5: renders a chunked-BC policy's rollout
+├── train_rl_bc_aux.py                # Item 32: DAPG-style auxiliary BC loss PPO fine-tune (lever #1)
+├── residual_env.py                   # Item 33: ResidualActionEnv, residual-RL action wrapper (lever #3)
+├── train_rl_residual.py              # Item 33: trains a fresh PPO head atop a frozen base policy
+├── eval_policy_residual.py           # Item 33: 40-trial eval for a residual-RL checkpoint
+├── demo_residual.py                  # Item 33: renders a residual-RL policy's rollout
+├── train_bc_diffusion.py             # Item 33: conditional-DDPM generative BC head (lever #4)
+├── eval_policy_diffusion.py          # Item 33: 40-trial eval for a diffusion-BC checkpoint
+├── demo_diffusion.py                 # Item 33: renders a diffusion-BC policy's rollout
 ├── runs/                             # training checkpoints/logs (gitignored, not committed)
 ├── data/                             # BC demo datasets (gitignored, not committed)
 ├── demo_stage1_kinematic_sweep.py    # Stage 1: verification sweep, see media/ GIF above
@@ -1942,6 +2045,8 @@ panda_vision_grasp/
 │       grasp14_std002.gif, grasp15_plateau_best.gif, grasp16_bcaux_best.gif,
 │       grasp17_bcaux_const_best.gif, grasp20_bcaux_coef30_best.gif,
 │       grasp21_bcaux_coef30_seed1_best.gif, grasp23_bcaux_coef30_seed3_best.gif,
+│       grasp24_residual_best.gif, grasp24_residual_collapsed.gif, bc31_diffusion_fail.gif,
+│       bc32_diffusion_chunked_fail.gif, bc33_diffusion_chunked_noweight_fail.gif,
 │       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
