@@ -74,10 +74,23 @@ def main():
                           "expert's own correct gripper command already. Keeps the visited-state "
                           "distribution consistent with how this checkpoint is actually run at "
                           "eval time. Pass a negative value to disable.")
+    ap.add_argument("--steps", type=int, default=None,
+                     help="Same mid-training-checkpoint selection as eval_policy.py --steps: "
+                          "load checkpoints/ppo_<steps>_steps.zip + "
+                          "ppo_vecnormalize_<steps>_steps.pkl instead of the default "
+                          "checkpoints/final.zip + vecnormalize_final.pkl. Needed to drive a "
+                          "rollout from a mid-run_rl_bc_aux.py checkpoint like grasp23's "
+                          "best-performing 160k-step save, which was never copied to final.")
     args = ap.parse_args()
 
     run_dir = f"runs/{args.run_name}"
-    policy = PPO.load(f"{run_dir}/checkpoints/final")
+    if args.steps is not None:
+        model_stem = f"ppo_{args.steps}_steps"
+        vecnorm_name = f"ppo_vecnormalize_{args.steps}_steps.pkl"
+    else:
+        model_stem = "final"
+        vecnorm_name = "vecnormalize_final.pkl"
+    policy = PPO.load(f"{run_dir}/checkpoints/{model_stem}")
     mean_action = load_mean_action(run_dir)
     env = GraspPixelEnv(curriculum_scale=1.0)
     sim = env  # keeps a direct reference for q_target/obj_pos0/model -- FrameStackWristEnv
@@ -86,7 +99,7 @@ def main():
     if is_framestacked:
         env = FrameStackWristEnv(env)  # item 31: trained against a stacked-wrist checkpoint
     vec_env = DummyVecEnv([lambda: env])
-    norm_env = VecNormalize.load(f"{run_dir}/checkpoints/vecnormalize_final.pkl", vec_env)
+    norm_env = VecNormalize.load(f"{run_dir}/checkpoints/{vecnorm_name}", vec_env)
     norm_env.training = False
     norm_env.norm_reward = False
 

@@ -2026,6 +2026,70 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     <p align="center"><sub><code>bc34</code> (overlapping chunks, seed 29) -- real arm-object
     contact now visible, but no completed grasp+lift. Still below champion <code>bc21</code>.</sub></p>
 
+35. **User: "what application can we use lever #1 for" -> "let's go with option 2, crown it
+    as champion, but try 1 first."** Option 1: a DAgger round driven by `grasp23` (item 32's
+    lever #1 win) instead of `bc21`, on the theory that a genuinely different, better policy
+    visits different corrective states than four already-exhausted rounds off `bc21` (item 30)
+    did. Added `--steps` to `collect_dagger.py` (same mid-checkpoint selection as
+    `eval_policy.py`, needed since `grasp23`'s best checkpoint is `ppo_160000_steps.zip`, not
+    `checkpoints/final`) and collected 200 fresh episodes (`dagger15.npz`, seeds 10000-10199),
+    merged with the `demos_dagger10` base (240k transitions), retrained with `bc21`'s exact
+    recipe (`net_arch=64,64`, `hold_weight=1.5`, no early stopping) -> `bc35`.
+
+    **`bc35` is a clean negative result**: 4/40 on the standard seed set, and 30/200 on a much
+    larger sample (see item 36) -- below both `bc21` (33/200) and `grasp23` (40/200). Swapping
+    the DAgger rollout-driving policy from the stuck `bc21` to the better `grasp23` does visit
+    different states (`grasp23` only succeeded on 1/200 of the harvested rollouts, vs.
+    `grasp23`'s own ~20% true rate -- these specific seeds, see item 36, turned out unusually
+    hard), but those states didn't contain a useful aggregate training signal either. **Plain
+    DAgger off any current-generation champion is genuinely exhausted as a lever at this
+    point** -- four attempts off `bc21` (item 30) plus this one off `grasp23`, all negative.
+
+    <p align="center">
+      <img src="media/bc35_dagger_from_grasp23.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc35</code> (DAgger harvest from <code>grasp23</code>, seed 5)
+    -- one of its real successes, but still below both baselines overall.</sub></p>
+
+36. **A real finding surfaced while testing `bc35`, not something we went looking for:
+    `collect_dagger.py`'s rollout of `grasp23` scored 1/200 on seeds 10000-10199 -- wildly
+    below its own reported 12/40 (30%). Chased rather than dismissed as noise (per this
+    project's own standing discipline), and it reframes every headline number in this
+    README.** Confirmed independently with `eval_policy.py` directly (not a `collect_dagger.py`
+    bug): `grasp23` scores 0/40 and `bc21` scores 1/40 on that same fresh seed block. Ran much
+    larger, more reliable 200-trial sweeps (seeds 0-199, includes the original 0-39 as a
+    subset) on every live checkpoint to find the real picture:
+
+    | checkpoint | seeds 0-39 (headline) | seeds 0-199 (n=200) | seeds 10000-10039 |
+    |---|---|---|---|
+    | `bc21` | 11/40 (27.5%) | 33/200 (16.5%) | 1/40 (2.5%) |
+    | `grasp22`@45k | 12/40 (30%) | 32/200 (16.0%) | -- |
+    | `grasp23`@160k | 12/40 (30%) | **40/200 (20.0%)** | 0/40 (0%) |
+    | `bc35` | 4/40 (10%) | 30/200 (15.0%) | -- |
+
+    **Two things this reveals.** First, the fixed 40-seed set (0-39) this entire investigation
+    has used for every checkpoint-selection decision was a moderately favorable sample --
+    every checkpoint's true success rate is closer to 15-20%, not the 10-30% the headline
+    numbers suggested. Second, and more important for item 32's "win past parity" claim:
+    `grasp22` and `grasp23` were reported as TIED at 12/40, but at n=200 they diverge --
+    `grasp22` regresses to essentially `bc21`'s own level (32 vs 33, indistinguishable), while
+    `grasp23` holds a real edge (40 vs 33). That 40-vs-33 margin is directionally consistent
+    with item 32's claim but NOT strongly significant on its own at this sample size (two-
+    proportion z~0.91, p~0.36, two-tailed) -- the honest statement is "best available evidence
+    still favors `grasp23`," not "conclusively proven."  A single contiguous 40-seed block, in
+    either direction, is not a reliable tie-breaker for margins this size; a seed block can
+    swing a checkpoint's apparent rate by 10-20 points purely from which corner of the object-
+    placement space it happens to sample (seeds 10000-10039 were unusually hard for every
+    checkpoint tested, including the two policies' own 200-sample averages).
+
+    **Decision: crown `grasp23`@160k as this investigation's final champion**, on the strength
+    of the n=200 comparison (the best evidence available, even if not airtight), but documented
+    here with its honest ~20% true success rate rather than the more flattering 30% headline --
+    and flagging n=200, not n=40, as the eval convention any future work on this project should
+    use for close calls. Lever #1 (`bc_coef=30` DAPG fine-tuning) remains the one confirmed,
+    reproducible improvement this entire multi-lever investigation found over the original pure-
+    BC approach.
+
 ## Repository layout
 
 ```
@@ -2084,7 +2148,8 @@ panda_vision_grasp/
 │       grasp21_bcaux_coef30_seed1_best.gif, grasp23_bcaux_coef30_seed3_best.gif,
 │       grasp24_residual_best.gif, grasp24_residual_collapsed.gif, bc31_diffusion_fail.gif,
 │       bc32_diffusion_chunked_fail.gif, bc33_diffusion_chunked_noweight_fail.gif,
-│       bc34_diffusion_overlap_fail.gif, yaw_alignment_comparison.png
+│       bc34_diffusion_overlap_fail.gif, bc35_dagger_from_grasp23.gif,
+│       yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```
