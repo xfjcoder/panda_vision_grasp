@@ -1989,6 +1989,43 @@ under the model's own (already-tuned) position actuators, then the gripper closi
     not attempted here). Lever #1 (`bc_coef=30` DAPG fine-tuning, item 32) remains this
     investigation's only confirmed win over champion `bc21`.
 
+34. **Follow-up on item 33's flagged fix: overlapping chunk sampling for the diffusion head
+    (`bc34_diffusion_overlap`).** Item 33 diagnosed `bc32`/`bc33`'s conditioning collapse as most
+    likely caused by fixed-stride `build_chunks` shrinking the training set 10x (216k per-step
+    transitions -> 21.6k chunk-start images), too few for the CNN encoder to learn real
+    conditioning in a 40-epoch budget. Added a `stride` parameter to `build_chunks`
+    (`train_bc_chunked.py`) and a `--chunk-stride` flag to `train_bc_diffusion.py`: `stride=1` lays
+    a chunk start at every transition instead of every `chunk_size`-th one, restoring 199.8k
+    overlapping chunk rows (each still a coherent 10-step target block) from the same demos.
+
+    Quantitatively confirmed this fixes the diagnosed cause: directly comparing model output
+    across four very different real observations, `bc34`'s arm-channel sensitivity is ~4x
+    `bc33`'s (mean pairwise output diff 0.060 vs. 0.015) -- conditioning collapse is substantially
+    reduced, not total anymore. This shows up behaviorally too: the object is actually touched/
+    pushed in 19/40 trials (nonzero `drift`), vs. 2/40 for `bc32` and 3/40 for `bc33` -- real
+    reaching behavior where there was previously almost none.
+
+    | checkpoint | variant | success | mean reward | contact rate (nonzero drift) |
+    |---|---|---|---|---|
+    | `bc33_diffusion_chunked_noweight` | chunked, stride=chunk_size (21.6k rows) | 0/40 | -23.37 | 3/40 |
+    | `bc34_diffusion_overlap` | chunked, stride=1 (199.8k rows) | 0/40 | -18.58 | 19/40 |
+
+    Still **0/40 -- the fix didn't close the gap, only partially closed the diagnosed cause.**
+    `rise` stays at or below 0 in every trial: the arm now reaches toward and contacts the object,
+    but never completes a grasp-then-lift. The gripper channel is the likely remaining bottleneck
+    -- its cross-observation sensitivity is still far lower than the arm channels' (mean diff
+    ~0.0005-0.0008 regardless of input, both before and after this fix), meaning closure timing is
+    driven mostly by proprioceptive state, not by what the camera actually sees relative to the
+    object. Not pursued further within this investigation's scope -- a stronger conditioning
+    mechanism (FiLM/cross-attention) or more epochs on this now-denser dataset are the next things
+    to try.
+
+    <p align="center">
+      <img src="media/bc34_diffusion_overlap_fail.gif" width="280">
+    </p>
+    <p align="center"><sub><code>bc34</code> (overlapping chunks, seed 29) -- real arm-object
+    contact now visible, but no completed grasp+lift. Still below champion <code>bc21</code>.</sub></p>
+
 ## Repository layout
 
 ```
@@ -2047,7 +2084,7 @@ panda_vision_grasp/
 │       grasp21_bcaux_coef30_seed1_best.gif, grasp23_bcaux_coef30_seed3_best.gif,
 │       grasp24_residual_best.gif, grasp24_residual_collapsed.gif, bc31_diffusion_fail.gif,
 │       bc32_diffusion_chunked_fail.gif, bc33_diffusion_chunked_noweight_fail.gif,
-│       yaw_alignment_comparison.png
+│       bc34_diffusion_overlap_fail.gif, yaw_alignment_comparison.png
 ├── requirements.txt
 └── README.md
 ```

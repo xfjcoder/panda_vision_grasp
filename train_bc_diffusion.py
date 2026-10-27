@@ -145,6 +145,15 @@ def main():
                      help="Actions per diffusion draw, executed open-loop before re-planning. "
                           "1 reproduces the original (broken -- see module docstring) per-step "
                           "behavior; 10 matches train_bc_chunked.py's default.")
+    ap.add_argument("--chunk-stride", type=int, default=None,
+                     help="Spacing between chunk starts. Default (None) = chunk_size, i.e. the "
+                          "original non-overlapping grid (21.6k distinct chunk-start images for "
+                          "demos_dagger10.npz) that bc32/bc33 found too sparse for the CNN "
+                          "encoder to learn real conditioning on, collapsing to near-constant "
+                          "output regardless of input. --chunk-stride 1 instead lays a chunk "
+                          "start at every transition (216k rows, chunk_size/stride as many as "
+                          "the default), restoring full image coverage while keeping each "
+                          "training target a coherent chunk_size-step block.")
     ap.add_argument("--hold-weight", type=float, default=1.5)
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--epochs", type=int, default=40)
@@ -165,17 +174,19 @@ def main():
 
     weights_all = compute_hold_weights(proprio, args.hold_weight)
     if args.chunk_size > 1:
+        stride = args.chunk_stride or args.chunk_size
         n_eps = n // EPISODE_STEPS
-        n_chunks_per_ep = EPISODE_STEPS // args.chunk_size
+        offsets = np.arange(0, EPISODE_STEPS - args.chunk_size + 1, stride)
+        n_chunks_per_ep = len(offsets)
         # weights_all is per-transition -- re-index to one weight per chunk (its start
-        # transition) with the same fixed stride build_chunks uses, so the two stay aligned.
-        starts = np.array([ep * EPISODE_STEPS + c * args.chunk_size
-                            for ep in range(n_eps) for c in range(n_chunks_per_ep)])
+        # transition) with the same stride build_chunks uses, so the two stay aligned.
+        starts = np.array([ep * EPISODE_STEPS + o for ep in range(n_eps) for o in offsets])
         weights_all = weights_all[starts]
         images, wrist_images, proprio, actions = build_chunks(
-            images, wrist_images, proprio, actions, args.chunk_size, random_starts=False)
+            images, wrist_images, proprio, actions, args.chunk_size, random_starts=False,
+            stride=stride)
         n = len(actions)
-        print(f"built {n} chunks of size {args.chunk_size}")
+        print(f"built {n} chunks of size {args.chunk_size}, stride={stride}")
         train_idx, val_idx = chunk_episode_val_split(n, n_chunks_per_ep, args.val_frac, args.seed)
     else:
         train_idx, val_idx = episode_val_split(n, args.val_frac, args.seed)

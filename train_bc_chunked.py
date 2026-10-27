@@ -84,7 +84,7 @@ class ChunkedBCNet(nn.Module):
 
 
 def build_chunks(images, wrist_images, proprio, actions, chunk_size, random_starts=False,
-                  rng=None):
+                  rng=None, stride=None):
     """random_starts=False (bc05_chunked): chunk starts only at fixed multiples of chunk_size --
     cheap and matches the fixed re-planning cadence used at eval time, but means the model is
     NEVER queried at an off-grid timestep during training. Confirmed this is exactly why
@@ -95,13 +95,25 @@ def build_chunks(images, wrist_images, proprio, actions, chunk_size, random_star
     random_starts=True: sample chunk starts uniformly over every valid position in the episode
     (not just the fixed grid), same total chunk COUNT per episode so the dataset size is
     unchanged -- so the model is queryable from any timestep, a prerequisite for --adaptive to
-    mean anything."""
+    mean anything.
+
+    stride=None (default) uses chunk_size, i.e. the original non-overlapping grid above.
+    stride<chunk_size (e.g. 1) instead lays a chunk start at every `stride`-th transition,
+    producing overlapping chunks -- chunk_size/stride times as many rows for the same demos.
+    Added for train_bc_diffusion.py's bc32/bc33 conditioning-collapse fix: the non-overlapping
+    grid shrinks 216k transitions to 21.6k distinct chunk-start images, too few for the CNN
+    encoder to learn real conditioning in a 40-epoch budget; stride=1 restores full image
+    coverage (216k rows again) while keeping each row's target a coherent chunk_size-step block."""
     n_eps = len(actions) // EPISODE_STEPS
+    stride = stride or chunk_size
     n_chunks_per_ep = EPISODE_STEPS // chunk_size
     if random_starts:
         rng = rng or np.random.default_rng(0)
         starts = np.array([ep * EPISODE_STEPS + rng.integers(0, EPISODE_STEPS - chunk_size + 1)
                             for ep in range(n_eps) for _ in range(n_chunks_per_ep)])
+    elif stride != chunk_size:
+        offsets = np.arange(0, EPISODE_STEPS - chunk_size + 1, stride)
+        starts = np.array([ep * EPISODE_STEPS + o for ep in range(n_eps) for o in offsets])
     else:
         starts = np.array([ep * EPISODE_STEPS + c * chunk_size
                             for ep in range(n_eps) for c in range(n_chunks_per_ep)])
